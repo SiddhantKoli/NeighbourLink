@@ -11,8 +11,8 @@ const all = async (sql, ...args) => (await query(sql, args)).rows;
 const get = async (sql, ...args) => (await all(sql, ...args))[0];
 const run = async (sql, ...args) => query(sql, args);
 const listings = 'SELECT l.id,l.owner,l.kind,l.title,l.category,l.price,l.area,l.description,l.active,(l.photo IS NOT NULL) AS hasPhoto,u.name FROM listings l JOIN users u ON u.id=l.owner';
-const threads = 'SELECT r.*,l.title,l.owner,l.kind,u.name AS "requesterName",o.name AS "ownerName" FROM requests r JOIN listings l ON l.id=r.listing JOIN users u ON u.id=r.requester JOIN users o ON o.id=l.owner';
-const assets = new Map([['/', ['index.html','text/html']], ['/app.js',['app.js','text/javascript']], ['/app.css',['app.css','text/css']]]);
+const threads = 'SELECT r.*,l.price AS listing_price,(SELECT score FROM ratings WHERE booking=r.id) AS score,l.title,l.owner,l.kind,u.name AS "requesterName",o.name AS "ownerName" FROM requests r JOIN listings l ON l.id=r.listing JOIN users u ON u.id=r.requester JOIN users o ON o.id=l.owner';
+const assets = new Map([['/', ['index.html','text/html']], ['/login', ['index.html','text/html']], ['/app.js',['app.js','text/javascript']], ['/app.css',['app.css','text/css']]]);
 for (const name of ['camera','tent','bicycle']) {
   assets.set('/examples/' + name + '.jpg', ['photos/' + name + '.jpg','image/jpeg']);
 }
@@ -105,7 +105,7 @@ async function api(req, res, path) {
     threads: await all(threads + ' WHERE r.requester=? OR l.owner=? ORDER BY r.id DESC', user.id, user.id),
     reports: admin ? await all('SELECT reports.*,listings.title FROM reports JOIN listings ON listings.id=reports.listing WHERE reports.status=?', 'open') : []
   };
-  const match = path.match(/^\/(listings|saved|requests|reports)\/(\d+)(?:\/(messages))?$/);
+  const match = path.match(/^\/(listings|saved|requests|reports)\/(\d+)(?:\/(messages|rating))?$/);
   const id = match && Number(match[2]);
   if (method === 'POST' && path === '/listings') {
     const body = await json(req);
@@ -118,7 +118,9 @@ async function api(req, res, path) {
     return { id: (await get('INSERT INTO listings(owner,kind,title,category,price,area,description,photo) VALUES(?,?,?,?,?,?,?,?) RETURNING id', user.id,kind,field(body,'title',100),category,body.price,field(body,'area',100),field(body,'description',1200),photo || null)).id };
   }
   if (match?.[1] === 'listings' && method === 'DELETE') {
-    if (!(await run('UPDATE listings SET active=0 WHERE id=? AND owner=?', id, user.id)).changes) fail(404, 'Listing unavailable.');
+    if (!await get('SELECT id FROM listings WHERE id=? AND owner=?', id,user.id)) fail(404,'Listing unavailable.');
+    const result = await run("UPDATE listings SET active=0 WHERE id=? AND owner=? AND NOT EXISTS (SELECT 1 FROM requests WHERE listing=? AND status IN ('accepted','active','returned','completion_proposed'))", id,user.id,id);
+    if (!result.changes) fail(409,'Finish or cancel the active booking before unpublishing.');
     return { ok: true };
   }
   if (match?.[1] === 'saved' && ['PUT','DELETE'].includes(method)) {
@@ -143,21 +145,47 @@ async function api(req, res, path) {
     }
     const thread = await get(threads + ' WHERE r.id=? AND (r.requester=? OR l.owner=?)', id, user.id, user.id);
     if (!thread) fail(404, 'Conversation unavailable.');
-    if (match[3] && method === 'GET') return (await all('SELECT id,sender,body,sent FROM messages WHERE request=? ORDER BY id DESC LIMIT 200', id)).reverse();
-    if (match[3] && method === 'POST') {
+    if (match[3] === 'messages' && method === 'GET') return (await all('SELECT id,sender,body,sent FROM messages WHERE request=? ORDER BY id DESC LIMIT 200', id)).reverse();
+    if (match[3] === 'messages' && method === 'POST') {
       await run('INSERT INTO messages(request,sender,body) VALUES(?,?,?)', id, user.id, field(await json(req), 'message', 2000));
+      return { ok: true };
+    }
+    if (match[3] === 'rating' && method === 'POST') {
+      if (thread.requester !== user.id || thread.status !== 'completed') fail(403, 'Only the customer can review a completed booking.');
+      const body = await json(req);
+      if (!Number.isInteger(body.score) || body.score < 1 || body.score > 5) fail(400, 'Choose a rating from 1 to 5.');
+      const result = await run('INSERT INTO ratings(booking,score,comment) VALUES(?,?,?) ON CONFLICT DO NOTHING', id,body.score,field(body,'comment',500,false));
+      if (!result.changes) fail(409, 'You already reviewed this booking.');
       return { ok: true };
     }
     if (method === 'PATCH' && !match[3]) {
       const { status } = await json(req);
       const owner = user.id === thread.owner;
-      const allowed = thread.status === 'pending' ? (owner ? ['accepted','declined'] : ['cancelled']) : thread.status === 'accepted' ? (owner ? ['completed','cancelled'] : ['cancelled']) : [];
+      const transitions = {
+        pending: owner ? ['accepted','declined'] : ['cancelled'],
+        accepted: owner ? [thread.kind === 'gear' ? 'active' : 'completion_proposed','cancelled'] : ['cancelled'],
+        active: owner ? [] : ['returned'],
+        returned: owner ? ['completed'] : [],
+        completion_proposed: owner ? [] : ['completed']
+      };
+      const allowed = transitions[thread.status] || [];
       if (!allowed.includes(status)) fail(409, 'This request cannot change to that status.');
       const booking = status === 'accepted' && thread.kind === 'gear' && thread.start_date;
-      const overlap = " AND NOT EXISTS (SELECT 1 FROM requests booked WHERE booked.listing=? AND booked.id<>? AND booked.status IN ('accepted','completed') AND booked.start_date<=? AND booked.end_date>=?)";
+      const overlap = " AND NOT EXISTS (SELECT 1 FROM requests booked WHERE booked.listing=? AND booked.id<>? AND booked.status IN ('accepted','active','returned','completed') AND booked.start_date<=? AND booked.end_date>=?)";
       try {
-        const result = await run('UPDATE requests SET status=? WHERE id=? AND status=?' + (booking ? overlap : ''),
-          status,id,thread.status,...(booking ? [thread.listing,id,thread.end_date,thread.start_date] : []));
+        const column = {accepted:'accepted_at', active:'pickup_at', returned:'return_at', completed:'completed_at'}[status];
+        const assignments = ['status=?'];
+        const values = [status];
+        if (column) {
+          assignments.push(column + '=?');
+          values.push(new Date().toISOString());
+        }
+        if (status === 'accepted') {
+          assignments.push('agreed_price=?');
+          values.push(String(thread.listing_price));
+        }
+        const result = await run('UPDATE requests SET ' + assignments.join(', ') + ' WHERE id=? AND status=?' + (booking ? overlap : ''),
+          ...values,id,thread.status,...(booking ? [thread.listing,id,thread.end_date,thread.start_date] : []));
         if (!result.changes) fail(409, booking ? 'These rental dates are already booked or the request changed.' : 'Request changed. Refresh and try again.');
       } catch (error) {
         if (error.code === '23P01') fail(409,'These rental dates are already booked.');
@@ -209,6 +237,3 @@ createServer(async (req,res) => {
 }).listen(Number(process.env.PORT || 8767), process.env.HOST || '127.0.0.1', function () {
   console.log('NeighbourLink listening on port ' + this.address().port);
 });
-
-
-

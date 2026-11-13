@@ -9,9 +9,10 @@ const schema = `
   CREATE TABLE IF NOT EXISTS saved("user" INTEGER, listing INTEGER, PRIMARY KEY("user",listing));
   CREATE TABLE IF NOT EXISTS requests(id INTEGER PRIMARY KEY, listing INTEGER, requester INTEGER, status TEXT DEFAULT 'pending', start_date TEXT, end_date TEXT, details TEXT, UNIQUE(listing,requester));
   CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY, request INTEGER, sender INTEGER, body TEXT, sent TEXT DEFAULT CURRENT_TIMESTAMP);
+  CREATE TABLE IF NOT EXISTS ratings(booking INTEGER PRIMARY KEY, score INTEGER NOT NULL CHECK(score BETWEEN 1 AND 5), comment TEXT NOT NULL);
   CREATE TABLE IF NOT EXISTS reports(id INTEGER PRIMARY KEY, listing INTEGER, reporter INTEGER, reason TEXT, status TEXT DEFAULT 'open', UNIQUE(listing,reporter));
 `;
-const columns = ['start_date','end_date','details'];
+const columns = ['start_date','end_date','details','pickup_at','return_at','completed_at','accepted_at','agreed_price'];
 
 export async function openDatabase() {
   if (process.env.DATABASE_URL) {
@@ -37,10 +38,10 @@ export async function openDatabase() {
         DO $migration$
         BEGIN
           LOCK TABLE requests IN ACCESS EXCLUSIVE MODE;
-          IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'neighbourlink.requests'::regclass AND conname = 'requests_no_overlap') THEN
-            ALTER TABLE requests ADD CONSTRAINT requests_no_overlap EXCLUDE USING gist
+          IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'neighbourlink.requests'::regclass AND conname = 'requests_no_overlap_lifecycle') THEN
+            ALTER TABLE requests ADD CONSTRAINT requests_no_overlap_lifecycle EXCLUDE USING gist
               (listing WITH =, int4range(replace(start_date,'-','')::int,replace(end_date,'-','')::int,'[]') WITH &&)
-              WHERE (status IN ('accepted','completed') AND start_date IS NOT NULL AND end_date IS NOT NULL AND is_gear = 1);
+              WHERE (status IN ('accepted','active','returned','completed') AND start_date IS NOT NULL AND end_date IS NOT NULL AND is_gear = 1);
           END IF;
         END;
         $migration$;
@@ -50,7 +51,7 @@ export async function openDatabase() {
     finally { client.release(); }
     return async (sql, args) => {
       let index = 0;
-      const qualified = sql.replace(/\b(FROM|JOIN|INTO|UPDATE) (users|sessions|listings|saved|requests|messages|reports)\b/g, '$1 neighbourlink.$2');
+      const qualified = sql.replace(/\b(FROM|JOIN|INTO|UPDATE) (users|sessions|listings|saved|requests|messages|reports|ratings)\b/g, '$1 neighbourlink.$2');
       const result = await pool.query(qualified.replaceAll('?', () => '$' + ++index), args);
       return { rows: result.rows, changes: result.rowCount };
     };
@@ -69,5 +70,3 @@ export async function openDatabase() {
     return { changes: statement.run(...args).changes };
   };
 }
-
-

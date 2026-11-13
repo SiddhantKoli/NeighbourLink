@@ -17,3 +17,27 @@
 .nl-landing .nav-mobile{display:none}
 .nl-no-photo{font:600 12px var(--mono);color:#404040}.card-art:has(.nl-no-photo){background:#eeece6}
 .nl-upload-preview{max-width:100%;max-height:190px;object-fit:contain;justify-self:start}.nl-upload-preview[hidden]{display:none}
+
+body:has(.shell.landing){margin:0;overflow:hidden;overscroll-behavior:none}
+.shell.landing{height:100dvh;overflow:hidden}
+.shell.landing .main{min-height:0}
+.shell.landing .content{height:calc(100dvh - 56px);overflow:hidden}
+.shell.landing .portal{min-height:0;height:100%;grid-auto-rows:minmax(0,1fr)}
+.shell.landing .portal-panel{min-height:0;overflow:auto;overscroll-behavior:contain}
+body:has(.shell.landing) .nav-mobile,body.nl-login .nav-mobile{display:none}
+body.nl-login .shell{display:block}
+body.nl-login .sidebar,body.nl-login .top-left,body.nl-login .top-actions,body.nl-login .mobile-head{display:none}
+body.nl-login .landing-brand{display:flex}
+#view-login.active{display:grid;place-items:center;min-height:calc(100dvh - 120px);padding:20px}
+#login-panel{background:white;border:var(--line);padding:clamp(18px,4vw,36px);width:min(100%,460px);box-shadow:6px 6px 0 var(--ink)}
+#login-panel form{display:grid;gap:12px}
+@media(max-width:700px),(max-height:690px){
+  .shell.landing .portal-panel{padding:clamp(8px,2.4vh,24px) 18px}
+  .shell.landing .portal-middle{padding:clamp(3px,1vh,12px) 0}
+  .shell.landing .portal-icon{width:clamp(32px,7vh,55px);height:clamp(32px,7vh,55px);font-size:clamp(18px,4vh,32px);margin-bottom:clamp(4px,1vh,12px)}
+  .shell.landing .portal-title{font-size:clamp(20px,4.4vh,36px);margin-bottom:5px}
+  .shell.landing .portal-copy{font-size:12px}
+  .shell.landing .portal-num{font-size:clamp(30px,7vh,58px)}
+  .shell.landing .portal-cta{padding:8px 12px}
+}
+.portal-icon img{display:block;width:100%;height:100%;min-height:0;object-fit:cover}

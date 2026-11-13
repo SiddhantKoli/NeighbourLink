@@ -50,10 +50,23 @@ test('marketplace permissions, requests, messages, and moderation', async t => {
   assert.equal((await borrower('/activity')).threads[0].end_date,dates.endDate);
   const service = await owner('/listings',200,'POST',{title:'Piano lesson',kind:'help',category:'Lessons',price:200,area:'Bengaluru',description:'Beginner lessons'});
   await outsider('/requests/' + service.id,400,'PUT',{startDate:dates.startDate});
-  await outsider('/requests/' + service.id,200,'PUT',{startDate:dates.startDate,details:'First lesson'});
+  const job = await outsider('/requests/' + service.id,200,'PUT',{startDate:dates.startDate,details:'First lesson'});
   assert.equal((await outsider('/activity')).threads[0].details,'First lesson');
+  const jobPath = '/requests/' + job.id;
+  await owner(jobPath,200,'PATCH',{status:'accepted'});
+  await owner(jobPath,200,'PATCH',{status:'completion_proposed'});
+  await owner(jobPath,409,'PATCH',{status:'completed'});
+  await outsider(jobPath,200,'PATCH',{status:'completed'});
+  await outsider(jobPath + '/rating',200,'POST',{score:4,comment:'Clear explanations'});
   await owner('/listings/' + service.id,200,'DELETE');
+  await borrower(path + '/rating',403,'POST',{score:5});
+  await owner(path,200,'PATCH',{status:'active'});
+  await owner('/listings/' + listing.id,409,'DELETE');
+  assert.equal((await borrower('/activity')).threads[0].agreed_price,'200');
+  await borrower(path,200,'PATCH',{status:'returned'});
   await owner(path,200,'PATCH',{status:'completed'});
+  await borrower(path + '/rating',200,'POST',{score:5});
+  await borrower(path + '/rating',409,'POST',{score:5});
   await borrower('/reports/' + listing.id,200,'POST',{reason:'Test report'});
   const [report] = (await admin('/activity')).reports;
   await outsider('/reports/' + report.id,404,'PATCH',{status:'removed'});
@@ -63,8 +76,8 @@ test('marketplace permissions, requests, messages, and moderation', async t => {
   await borrower('/activity',401);
   await borrower('/login',200,'POST',account('borrower'));
   assert.equal((await borrower('/activity')).threads[0].status,'completed');
+  assert.equal((await fetch(origin + '/login')).status,200);
   const page = await fetch(origin);
   assert.match(await page.text(),/view-landing/);
   assert.equal((await fetch(origin + '/app.js')).status,200);
 });
-

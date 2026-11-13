@@ -6,7 +6,7 @@ const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({
 const categories = { gear: ['Tools','Tech & Camera','Outdoors'], help: ['Home repair','Creative','Lessons'] };
 const groups = { Tools:'tools', 'Tech & Camera':'tech', Outdoors:'outdoors', 'Home repair':'home', Creative:'creative', Lessons:'lessons' };
 const filters = { home:'all', rentals:'all', services:'all' };
-const views = ['landing','home','rentals','services','saved','messages','dashboard'];
+const views = ['landing','home','rentals','services','saved','messages','dashboard','login'];
 const examples = [
   { kind:'gear', title:'Digital camera kit', category:'Tech & Camera', area:'Indiranagar, Bengaluru', description:'Camera with lens and strap for a weekend shoot.', price:900, photo:'camera' },
   { kind:'gear', title:'Two-person camping tent', category:'Outdoors', area:'Domlur, Bengaluru', description:'Compact tent for a short camping trip.', price:400, photo:'tent' },
@@ -26,6 +26,7 @@ let activity = { saved:[], threads:[], listings:[], reports:[] };
 let threadId = null;
 let query = '';
 let afterSignIn;
+let signInReturn = 'home';
 let toastTimer;
 const accountButton = document.createElement('button');
 accountButton.className = 'btn nl-account';
@@ -59,11 +60,19 @@ function dialog(id, heading, fields) {
   document.body.append(node);
   return node;
 }
-const auth = dialog('account-dialog','Sign in',
+const authFields =
   '<label class="nl-field">Name<input name="name" maxlength="80" autocomplete="name"></label>' +
   '<label class="nl-field">Email<input name="email" type="email" required maxlength="254" autocomplete="email"></label>' +
   '<label class="nl-field">Password<input name="password" type="password" required minlength="12" maxlength="128"></label>' +
-  '<button class="btn" type="button" id="auth-mode"></button>');
+  '<button class="btn" type="button" id="auth-mode"></button>';
+const auth = $('#login-panel');
+auth.innerHTML = '<h1 id="account-dialog-title">Sign in</h1><form>' + authFields +
+  '<p role="alert" class="nl-error"></p><div class="nl-controls"><button class="btn primary">Sign in</button>' +
+  '<button class="btn" type="button" id="cancel-login">Back</button></div></form>';
+$('#cancel-login').onclick = () => {
+  afterSignIn = undefined;
+  perform(() => navigate(signInReturn));
+};
 $('#listing-modal').remove();
 const listing = dialog('listing-dialog','Put it to use.',
   '<label class="nl-field">Title<input name="title" required maxlength="100"></label>' +
@@ -74,6 +83,16 @@ const listing = dialog('listing-dialog','Put it to use.',
   '<label class="nl-field">Description<textarea name="description" required maxlength="1200" rows="3"></textarea></label>' +
   '<label class="nl-field">Listing photo (JPEG, PNG, or WebP, up to 1 MB)<input name="photo" type="file" required accept="image/jpeg,image/png,image/webp"><small>Use a clear photo of the actual item or an example of your own work.</small><img class="nl-upload-preview" alt="Your listing photo preview" hidden></label>');
 const report = dialog('report-dialog','Report listing','<label class="nl-field">Reason<textarea name="reason" required maxlength="500" rows="3"></textarea></label>');
+const review = dialog('review-dialog','Review your booking',
+  '<label class="nl-field">Rating<select name="score"><option>5</option><option>4</option><option>3</option><option>2</option><option>1</option></select></label>' +
+  '<label class="nl-field">Comment<textarea name="comment" maxlength="500"></textarea></label>');
+submit(review, async form => {
+  await api('/requests/' + threadId + '/rating','POST',{score:Number(form.get('score')),comment:form.get('comment')});
+  review.close();
+  review.querySelector('form').reset();
+  await refresh();
+  await openThread(threadId);
+});
 let reportedId;
 let requestedListing;
 const booking = dialog('booking-dialog','Send a request',
@@ -153,17 +172,19 @@ function requireUser(action) {
   if (user) return action();
   afterSignIn = action;
   renderAuth(false);
-  show(auth);
+  signInReturn = view === 'login' ? 'home' : view;
+  return navigate('login');
 }
 $('#auth-mode').onclick = () => renderAuth(auth.dataset.mode !== 'signup');
 submit(auth, async form => {
   await api('/' + auth.dataset.mode, 'POST', Object.fromEntries(form));
   user = await api('/session');
-  auth.close();
+  const destination = signInReturn;
   auth.querySelector('form').reset();
   await refresh();
   const next = afterSignIn;
   afterSignIn = undefined;
+  await navigate(destination);
   if (next) await next();
 });
 accountButton.onclick = () => perform(() => user ? navigate('dashboard') : requireUser(() => navigate('dashboard')));
@@ -272,7 +293,13 @@ async function refresh() {
 function navigate(next, updateHash = true) {
   if (!views.includes(next)) next = 'landing';
   view = next;
-  if (updateHash && location.hash !== '#' + next) history.pushState(null,'',next === 'landing' ? '/' : '#' + next);
+  const route = next === 'landing' ? '/' : next === 'login' ? '/login' : '/#' + next;
+  if (updateHash && location.pathname + location.hash !== route) history.pushState(null,'',route);
+  document.body.classList.toggle('nl-login',next === 'login');
+  if (next === 'login') {
+    renderAuth(false);
+    requestAnimationFrame(() => auth.querySelector('[name="email"]').focus());
+  }
   document.querySelectorAll('.view').forEach(section => section.classList.toggle('active',section.id === 'view-' + next));
   document.querySelectorAll('[data-view]').forEach(button => button.classList.toggle('active',button.dataset.view === next));
   $('.shell').classList.toggle('landing',next === 'landing');
@@ -303,9 +330,38 @@ async function openThread(id) {
     summary.textContent = dates + (thread.details ? ' · ' + thread.details : '');
     chat.append(summary);
   }
+  if (thread.agreed_price != null) {
+    const price = document.createElement('p');
+    price.textContent = 'Agreed rate: ₹' + Number(thread.agreed_price).toLocaleString('en-IN') + (thread.kind === 'gear' ? ' per day' : ' per job');
+    chat.append(price);
+  }
+  const timeline = document.createElement('ol');
+  for (const [label, time] of [['Accepted',thread.accepted_at],['Pickup recorded',thread.pickup_at],['Return marked',thread.return_at],['Completed',thread.completed_at]]) {
+    if (!time) continue;
+    const entry = document.createElement('li');
+    entry.textContent = label + ' · ' + new Date(time).toLocaleString();
+    timeline.append(entry);
+  }
+  if (timeline.childElementCount) chat.append(timeline);
   const owner = thread.owner === user.id;
-  const states = thread.status === 'pending' ? (owner ? ['accepted','declined'] : ['cancelled']) : thread.status === 'accepted' ? (owner ? ['completed','cancelled'] : ['cancelled']) : [];
-  const labels = {accepted:'Accept',declined:'Decline',completed:'Complete',cancelled:'Cancel request'};
+  const transitions = {
+    pending: owner ? ['accepted','declined'] : ['cancelled'],
+    accepted: owner ? [thread.kind === 'gear' ? 'active' : 'completion_proposed','cancelled'] : ['cancelled'],
+    active: owner ? [] : ['returned'],
+    returned: owner ? ['completed'] : [],
+    completion_proposed: owner ? [] : ['completed']
+  };
+  const states = transitions[thread.status] || [];
+  const labels = {accepted:'Accept',declined:'Decline',active:'Record pickup',returned:'Mark returned',
+    completion_proposed:'Propose completion',completed:thread.kind === 'gear' ? 'Confirm receipt' : 'Confirm completion',cancelled:'Cancel request'};
+  if (thread.score) chat.append(' · Rating ' + thread.score + '/5');
+  if (!owner && thread.status === 'completed' && !thread.score) {
+    const button = document.createElement('button');
+    button.className = 'btn';
+    button.textContent = 'Leave a review';
+    button.onclick = () => show(review);
+    chat.append(' ',button);
+  }
   for (const status of states) {
     const button = document.createElement('button');
     button.className = 'btn';
@@ -408,13 +464,11 @@ $('#message-form').onsubmit = event => {
     } finally { button.disabled = false; }
   });
 };
-window.addEventListener('popstate',() => perform(() => navigate(location.hash.slice(1),false)));
+function currentRoute() { return location.pathname === '/login' ? 'login' : location.hash.slice(1) || 'landing'; }
+window.addEventListener('popstate',() => perform(() => navigate(currentRoute(),false)));
 perform(async () => {
+  await navigate(currentRoute(),false);
   user = await api('/session');
   await refresh();
-  await navigate(location.hash.slice(1) || 'landing',false);
+  if (view === 'messages') await openThread(threadId);
 });
-
-
-
-
