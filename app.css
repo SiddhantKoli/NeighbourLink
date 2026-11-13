@@ -1,0 +1,19 @@
+.nl-controls{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:12px 0}
+.nl-controls input,.nl-field input,.nl-field select,.nl-field textarea{border:var(--line);padding:10px;font:inherit;min-width:0}
+.nl-field{display:grid;gap:5px}
+.nl-photo{width:100%;height:100%;object-fit:cover;position:absolute;inset:0}
+.card-art{position:relative;overflow:hidden}
+.card-art .tag,.card-art .heart{z-index:1}
+.nl-description{white-space:pre-wrap;overflow-wrap:anywhere;margin:10px 0}
+.nl-dialog{border:var(--line);padding:20px;width:min(500px,calc(100vw - 32px));max-height:90vh;overflow:auto;box-shadow:6px 6px 0 var(--ink)}
+.nl-dialog::backdrop{background:#0008}
+.nl-dialog form{display:grid;gap:12px}
+.nl-error{color:#a01414;min-height:1em}
+.nl-thread{display:block;width:100%;text-align:left;background:white;overflow-wrap:anywhere}
+.nl-thread.active{background:var(--mint)}
+.nl-record{padding:12px;border-bottom:var(--line);overflow-wrap:anywhere}
+.bubble,.card-body{overflow-wrap:anywhere}
+@media(max-width:700px){.shell:not(.landing) .top-actions{display:flex}.top-actions .nl-account{font-size:10px;padding:6px}.nl-dialog{padding:14px}}
+.nl-landing .nav-mobile{display:none}
+.nl-no-photo{font:600 12px var(--mono);color:#404040}.card-art:has(.nl-no-photo){background:#eeece6}
+.nl-upload-preview{max-width:100%;max-height:190px;object-fit:contain;justify-self:start}.nl-upload-preview[hidden]{display:none}
