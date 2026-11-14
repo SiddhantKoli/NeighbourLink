@@ -91,6 +91,12 @@ test('marketplace permissions, requests, messages, and moderation', async t => {
   await verifyEmail(admin,'admin@example.test');
   await completeProfile(admin,'admin');
   assert.equal((await admin('/session')).admin,true);
+  for (const path of ['/admin/dashboard','/admin/claims','/admin/users','/admin/listings','/admin/ledger']) await outsider(path,403);
+  assert.ok((await admin('/admin/dashboard')).users.total>=4);
+  assert.ok(Array.isArray(await admin('/admin/claims')));
+  assert.ok(Array.isArray(await admin('/admin/users')));
+  assert.ok(Array.isArray(await admin('/admin/listings')));
+  assert.ok(Array.isArray(await admin('/admin/ledger')));
   const idDocument=await owner.upload('kyc-id');
   const selfie=await owner.upload('kyc-selfie');
   await owner('/kyc/submit',200,'POST',{idUploadId:idDocument,selfieUploadId:selfie});
@@ -199,9 +205,53 @@ test('marketplace permissions, requests, messages, and moderation', async t => {
   assert.equal((await borrower('/activity')).threads.find(row=>row.id===cancellationRequest.id).status,'cancelled');
   assert.ok((await owner('/__test/ledger/'+cancellationRequest.id)).some(row=>row.event_type==='transfer_reversal'));
   await owner('/listings/'+cancellationListing.id,200,'DELETE');
+  async function disputedBooking(title) {
+    const image=await owner.upload('listing');
+    const item=await owner('/listings',200,'POST',{title,kind:'gear',category:'Tools',price:300,itemValueMinor:1000000,conditionChecklist:['Power switch works','No casing damage'],area:'Bengaluru',description:'Claim flow fixture',photoUploadId:image});
+    const booking=await borrower('/requests/'+item.id,200,'PUT',{startDate:'2099-07-01',endDate:'2099-07-01',details:'Claim flow test'});
+    const bookingPath='/requests/'+booking.id;
+    await owner(bookingPath,200,'PATCH',{status:'accepted'});
+    const checkout=await borrower(bookingPath+'/checkout',200,'POST',{});
+    await borrower(bookingPath+'/checkout/verify',200,'POST',{razorpay_order_id:checkout.orderId,razorpay_payment_id:'pay_test_'+booking.id,razorpay_signature:'test-signature:'+checkout.orderId+':pay_test_'+booking.id});
+    for (const [client,purpose,phase] of [[owner,'booking-handover','handover'],[borrower,'booking-handover','handover'],[owner,'booking-return','return'],[borrower,'booking-return','return']]) {
+      const uploadId=await client.upload(purpose);
+      await client(bookingPath+'/evidence',200,'POST',{phase,uploadId});
+    }
+    await owner(bookingPath+'/claim',400,'POST',{reason:'Missing supporting photo'});
+    const claimPhoto=await owner.upload('booking-claim');
+    await owner(bookingPath+'/claim',200,'POST',{reason:'Returned item needs repair.',uploadId:claimPhoto});
+    assert.equal((await borrower(bookingPath+'/claim')).status,'open');
+    await borrower(bookingPath+'/claim',200,'PATCH',{response:'The item was returned as received.'});
+    await borrower(bookingPath+'/claim',409,'PATCH',{response:'Duplicate response'});
+    await borrower(bookingPath+'/messages',200,'POST',{message:'I can provide the original condition photo.'});
+    const [entry]=await admin('/admin/claims');
+    assert.ok(entry.messages.length);
+    assert.equal(entry.claimEvidence.length,1);
+    assert.equal(entry.renter_response,'The item was returned as received.');
+    const ownerEvidence=await fetch(origin+'/api/v1/requests/'+booking.id+'/claim-evidence/'+entry.claimEvidence[0].id,{headers:{cookie:admin.cookie()}});
+    assert.equal(ownerEvidence.status,200);
+    const deniedEvidence=await fetch(origin+'/api/v1/requests/'+booking.id+'/claim-evidence/'+entry.claimEvidence[0].id,{headers:{cookie:outsider.cookie()}});
+    assert.equal(deniedEvidence.status,404);
+    return {booking,bookingPath};
+  }
+  const partialClaim=await disputedBooking('Dispute test drill');
+  await outsider('/admin/claims/'+partialClaim.booking.id+'/resolve',403,'POST',{decision:'full_refund'});
+  await admin('/admin/claims/'+partialClaim.booking.id+'/resolve',400,'POST',{decision:'partial_deduction',deductionMinor:999999999,reason:'invalid amount'});
+  const partialResult=await admin('/admin/claims/'+partialClaim.booking.id+'/resolve',200,'POST',{decision:'partial_deduction',deductionMinor:10000,reason:'Repair cost supported by photos'});
+  assert.equal(partialResult.status,'resolved');
+  assert.equal((await borrower('/activity')).threads.find(row=>row.id===partialClaim.booking.id).status,'resolved');
+  assert.ok((await owner('/__test/ledger/'+partialClaim.booking.id)).some(row=>row.event_type==='claim_deduction'&&row.amount_minor===10000));
+  assert.equal((await owner(partialClaim.bookingPath+'/audit')).at(-1).new_status,'resolved');
+  const refundClaim=await disputedBooking('Full refund dispute fixture');
+  const refundResult=await admin('/admin/claims/'+refundClaim.booking.id+'/resolve',200,'POST',{decision:'full_refund',reason:'Return photos support the renter.'});
+  assert.ok(refundResult.refundedMinor>0);
+  const captureClaim=await disputedBooking('Full deposit capture fixture');
+  const captureResult=await admin('/admin/claims/'+captureClaim.booking.id+'/resolve',200,'POST',{decision:'full_capture',reason:'Evidence confirms owner loss.'});
+  assert.equal(captureResult.refundedMinor,0);
+  assert.ok((await admin('/admin/dashboard')).disputes.total>=3);
   const competing = await outsider('/requests/' + listing.id,200,'PUT',dates);
   await owner('/requests/' + competing.id,409,'PATCH',{status:'accepted'});
-  assert.equal((await borrower('/activity')).threads[0].end_date,dates.endDate);
+  assert.equal((await borrower('/activity')).threads.find(row=>row.id===request.id).end_date,dates.endDate);
   const servicePhoto=await owner.upload('listing');
   const service = await owner('/listings',200,'POST',{title:'Piano lesson',kind:'help',category:'Lessons',price:200,area:'Bengaluru',description:'Beginner lessons',photoUploadId:servicePhoto});
   await outsider('/requests/' + service.id,400,'PUT',{startDate:dates.startDate});
@@ -225,7 +275,7 @@ test('marketplace permissions, requests, messages, and moderation', async t => {
   await outsider('/reports/' + report.id,404,'PATCH',{status:'removed'});
   await admin('/reports/' + report.id,200,'PATCH',{status:'removed'});
   await owner('/listings/' + highValue.id,200,'DELETE');
-  assert.deepEqual(await borrower('/listings'),[]);
+  assert.ok(!(await borrower('/listings')).some(item=>item.id===highValue.id));
   await borrower('/logout',200,'POST');
   await borrower('/activity',401);
   assert.equal((await fetch(origin + '/', {headers:{cookie:borrower.cookie()},redirect:'manual'})).status,302);
@@ -255,7 +305,7 @@ test('versioned foundation migrations seed placeholder settings and protect appe
     const { openDatabase } = await import('./database.mjs');
     const query = await openDatabase();
     const versions = await query('SELECT version,name FROM schema_migrations ORDER BY version');
-  assert.deepEqual(versions.rows.map(row => row.version),[1,2,3,4,5]);
+  assert.deepEqual(versions.rows.map(row => row.version),[1,2,3,4,5,6]);
     const settings = await query('SELECT setting_key,setting_value FROM marketplace_settings ORDER BY setting_key');
     assert.equal(settings.rows.find(row => row.setting_key === 'claim_window_hours').setting_value,'24');
     await query('INSERT INTO money_ledger(booking,event_type,amount_minor,currency,idempotency_key,metadata,occurred_at) VALUES(1,\'hold\',100,\'INR\',\'test-hold\',\'{}\',?)',new Date().toISOString());
@@ -265,6 +315,10 @@ test('versioned foundation migrations seed placeholder settings and protect appe
     await assert.rejects(() => query('UPDATE booking_status_audit SET new_status=\'declined\' WHERE id=1'),/append-only/);
     await query("INSERT INTO kyc_access_audit(reviewer_user_id,subject_user_id,document_kind,accessed_at) VALUES(1,2,'id',?)",new Date().toISOString());
     await assert.rejects(() => query('DELETE FROM kyc_access_audit WHERE id=1'),/append-only/);
+    await query("INSERT INTO booking_claim_audit(booking,event_type,event_data,occurred_at) VALUES(1,'claim_created','{}',?)",new Date().toISOString());
+    await assert.rejects(() => query('DELETE FROM booking_claim_audit WHERE id=1'),/append-only/);
+    await query("INSERT INTO booking_claim_evidence(id,booking,uploader_user_id,storage_key,content_type,uploaded_at) VALUES('claim-photo-test',1,2,'evidence/claim-photo-test','image/jpeg',?)",new Date().toISOString());
+    await assert.rejects(() => query('UPDATE booking_claim_evidence SET content_type=\'image/png\' WHERE id=\'claim-photo-test\''),/immutable/);
   } finally {
     if (oldUrl === undefined) delete process.env.DATABASE_URL; else process.env.DATABASE_URL = oldUrl;
     if (oldPath === undefined) delete process.env.DB_PATH; else process.env.DB_PATH = oldPath;

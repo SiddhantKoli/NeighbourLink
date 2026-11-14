@@ -414,7 +414,7 @@ async function api(req, res, path) {
   if (method === 'POST' && path === '/uploads') {
     throttle('uploads:' + req.socket.remoteAddress,60);
     const purpose=req.headers['x-upload-purpose'];
-    if (!['profile','listing','kyc-id','kyc-selfie','booking-handover','booking-return'].includes(purpose)) fail(400,'Choose a valid image purpose.');
+    if (!['profile','listing','kyc-id','kyc-selfie','booking-handover','booking-return','booking-claim'].includes(purpose)) fail(400,'Choose a valid image purpose.');
     if (purpose === 'listing' && !user.profileComplete) fail(403,'Complete your profile before listing items.');
     if (purpose.startsWith('kyc-') && !user.profileComplete) fail(403,'Verify your phone and finish your profile before identity verification.');
     if (purpose.startsWith('booking-') && !user.profileComplete) fail(403,'Complete your profile before adding booking evidence.');
@@ -521,6 +521,122 @@ async function api(req, res, path) {
     });
     return {ok:true,status:body.status};
   }
+  if (path==='/admin/dashboard'&&method==='GET') {
+    if (!admin) fail(403,'Admin access is required.');
+    const [users,listings,bookings,claims,financial]=await Promise.all([
+      get("SELECT COUNT(*) AS total,COUNT(CASE WHEN email_verified_at IS NOT NULL AND phone_verified_at IS NOT NULL THEN 1 END) AS verified,COUNT(CASE WHEN kyc_status='suspended' THEN 1 END) AS suspended FROM users"),
+      get('SELECT COUNT(*) AS total,COUNT(CASE WHEN active=1 THEN 1 END) AS active FROM listings'),
+      get("SELECT COUNT(*) AS captured,COUNT(CASE WHEN r.status='completed' THEN 1 END) AS completed,COUNT(CASE WHEN r.status IN ('disputed','resolved') THEN 1 END) AS claims FROM requests r JOIN protected_payments p ON p.booking=r.id WHERE p.payment_status='captured'"),
+      get("SELECT COUNT(*) AS open FROM booking_claims WHERE status IN ('open','resolving')"),
+      get("SELECT COALESCE(SUM(CASE WHEN event_type='commission' THEN amount_minor ELSE 0 END),0) AS revenue,COALESCE(SUM(CASE WHEN event_type='claim_deduction' THEN amount_minor ELSE 0 END),0) AS claim_deductions,COALESCE(SUM(CASE WHEN event_type='capture' THEN amount_minor ELSE 0 END),0) AS captured_minor FROM money_ledger")
+    ]);
+    const repeat=await get("SELECT COUNT(*) AS repeat_users,(SELECT COUNT(DISTINCT requester) FROM requests WHERE status IN ('completed','resolved')) AS completed_users FROM (SELECT requester FROM requests WHERE status IN ('completed','resolved') GROUP BY requester HAVING COUNT(*)>=2) repeat_renters");
+    const completed=Number(bookings.completed||0),captured=Number(bookings.captured||0);
+    const completedUsers=Number(repeat.completed_users||0),capturedMinor=Number(financial.captured_minor||0);
+    return {users:{total:Number(users.total||0),verified:Number(users.verified||0),suspended:Number(users.suspended||0)},listings:{total:Number(listings.total||0),active:Number(listings.active||0)},rentals:{captured,completed,repeatRenters:Number(repeat.repeat_users||0),repeatRate:completedUsers?Number(repeat.repeat_users||0)/completedUsers:0},disputes:{open:Number(claims.open||0),total:Number(bookings.claims||0),rate:captured?Number(bookings.claims||0)/captured:0,lossRate:capturedMinor?Number(financial.claim_deductions||0)/capturedMinor:0},revenueMinor:Number(financial.revenue||0)};
+  }
+  if (path==='/admin/users'&&method==='GET') {
+    if (!admin) fail(403,'Admin access is required.');
+    return await all(`SELECT u.id,u.name,u.email,u.phone,u.email_verified_at,u.phone_verified_at,u.kyc_status,
+      (SELECT COUNT(*) FROM requests r WHERE r.requester=u.id AND r.status IN ('completed','resolved')) AS completed_rentals,
+      (SELECT COUNT(*) FROM listings l WHERE l.owner=u.id AND l.active=1) AS active_listings
+      FROM users u ORDER BY u.id DESC LIMIT 200`);
+  }
+  if (path==='/admin/listings'&&method==='GET') {
+    if (!admin) fail(403,'Admin access is required.');
+    return await all('SELECT l.id,l.owner,l.kind,l.title,l.category,l.price,l.area,l.active,u.name AS owner_name,u.email AS owner_email FROM listings l JOIN users u ON u.id=l.owner ORDER BY l.id DESC LIMIT 200');
+  }
+  if (path==='/admin/ledger'&&method==='GET') {
+    if (!admin) fail(403,'Admin access is required.');
+    const limit=Math.max(1,Math.min(100,Number(new URL(req.url,'http://localhost').searchParams.get('limit'))||50));
+    return await all(`SELECT m.id,m.booking,m.event_type,m.amount_minor,m.currency,m.provider,m.provider_reference,m.idempotency_key,m.metadata,m.occurred_at,u.name AS actor_name
+      FROM money_ledger m LEFT JOIN users u ON u.id=m.actor_user_id ORDER BY m.id DESC LIMIT ?`,limit);
+  }
+  if (path==='/admin/claims'&&method==='GET') {
+    if (!admin) fail(403,'Admin access is required.');
+    const rows=await all(`SELECT c.booking,c.owner_user_id,c.reason,c.status AS claim_status,c.renter_response,c.created_at,c.responded_at,c.resolved_at,c.resolution,c.resolution_reason,c.deduction_minor,
+      r.status,r.requester,r.start_date,r.end_date,r.deposit_minor,l.title,l.category,l.condition_checklist,l.price,
+      owner.name AS owner_name,owner.email AS owner_email,renter.name AS renter_name,renter.email AS renter_email,p.payment_status,p.amount_minor
+      FROM booking_claims c JOIN requests r ON r.id=c.booking JOIN listings l ON l.id=r.listing
+      JOIN users owner ON owner.id=c.owner_user_id JOIN users renter ON renter.id=r.requester
+      LEFT JOIN protected_payments p ON p.booking=r.id ORDER BY CASE WHEN c.status='open' THEN 0 WHEN c.status='resolving' THEN 1 ELSE 2 END,c.created_at DESC LIMIT 100`);
+    return await Promise.all(rows.map(async row=>({...row,
+      evidence:await all('SELECT e.id,e.phase,e.uploader_user_id,e.uploaded_at,u.name FROM booking_evidence e JOIN users u ON u.id=e.uploader_user_id WHERE e.booking=? ORDER BY e.uploaded_at',row.booking),
+      messages:await all('SELECT m.body,m.sent,u.name FROM messages m JOIN users u ON u.id=m.sender WHERE m.request=? ORDER BY m.id LIMIT 200',row.booking),
+      claimEvidence:await all('SELECT e.id,e.uploader_user_id,e.uploaded_at,u.name FROM booking_claim_evidence e JOIN users u ON u.id=e.uploader_user_id WHERE e.booking=? ORDER BY e.uploaded_at',row.booking),
+      statusHistory:await all('SELECT old_status,new_status,occurred_at,actor_user_id FROM booking_status_audit WHERE booking=? ORDER BY id',row.booking),
+      claimHistory:await all('SELECT event_type,event_data,occurred_at,actor_user_id FROM booking_claim_audit WHERE booking=? ORDER BY id',row.booking)
+    })));
+  }
+  const resolveClaim=path.match(/^\/admin\/claims\/(\d+)\/resolve$/);
+  if (resolveClaim&&method==='POST') {
+    if (!admin) fail(403,'Admin access is required.');
+    const bookingId=Number(resolveClaim[1]),body=await json(req),decision=body.decision;
+    if (!['full_refund','partial_deduction','full_capture'].includes(decision)) fail(400,'Choose a supported deposit decision.');
+    const claim=await get('SELECT * FROM booking_claims WHERE booking=?',bookingId);
+    const payment=await get('SELECT * FROM protected_payments WHERE booking=?',bookingId);
+    if (!claim||!payment||payment.payment_status!=='captured') fail(404,'A paid claim is unavailable.');
+    if (!payments||!payment.provider_payment_id||!payment.deposit_transfer_id||!payment.rental_transfer_id) fail(503,'Payment settlement is unavailable or incomplete. Reconcile with the provider before deciding.');
+    let deduction=decision==='full_refund'?0:decision==='full_capture'?Number(payment.deposit_minor):body.deductionMinor;
+    if (!Number.isSafeInteger(deduction)||deduction<0||deduction>Number(payment.deposit_minor)||(decision==='partial_deduction'&&(deduction<1||deduction>=Number(payment.deposit_minor)))) fail(400,'The deduction must be a whole-paise amount within the refundable deposit.');
+    const reason=field(body,'reason',800,false),now=new Date().toISOString();
+    if (claim.status==='resolved') fail(409,'This claim has already been resolved.');
+    if (claim.status==='resolving'&&(claim.resolution!==decision||Number(claim.deduction_minor)!==deduction||claim.resolution_reason!==reason)) fail(409,'Retry the saved claim decision with the same choice and note.');
+    if (!['open','resolving'].includes(claim.status)||!(await get("SELECT id FROM requests WHERE id=? AND status='disputed'",bookingId))) fail(409,'This booking is not waiting for a claim decision.');
+    const settlement=await run("UPDATE protected_payments SET settlement_status='claim_resolving',settlement_started_at=?,updated_at=? WHERE booking=? AND (settlement_status='open' OR (settlement_status='claim_resolving' AND settlement_started_at<?))",now,now,bookingId,new Date(Date.now()-300000).toISOString());
+    if (!settlement.changes) fail(409,'Another claim settlement is in progress. Refresh before retrying.');
+    try {
+      if (claim.status==='open') {
+        await query.transaction(async tx=>{
+          const saved=await tx("UPDATE booking_claims SET status='resolving',resolution=?,resolution_reason=?,deduction_minor=?,resolver_user_id=? WHERE booking=? AND status='open'",decision,reason,deduction,user.id,bookingId);
+          if (!saved.changes) fail(409,'The claim changed. Refresh and review it again.');
+          await tx('INSERT INTO booking_claim_audit(booking,actor_user_id,event_type,event_data,occurred_at) VALUES(?,?,?,?,?)',bookingId,user.id,'resolution_started',JSON.stringify({decision,deductionMinor:deduction,reason}),now);
+        });
+      }
+      const renterRefund=Number(payment.deposit_minor)-deduction;
+      const reverseTransfer=async(transferId,target)=>{
+        if (!target) return;
+        const transfer=await payments.fetchTransfer(transferId);
+        if (!transfer) fail(503,'A held transfer cannot be verified. Reconciliation is required.');
+        const reversed=Number(transfer.amount_reversed||0);
+        if (reversed>target) fail(503,'The held deposit has already been reversed beyond this saved decision. Reconcile with Razorpay.');
+        if (reversed<target) await payments.reverseTransfer(transferId,target-reversed);
+      };
+      await reverseTransfer(payment.deposit_transfer_id,renterRefund);
+      const releasedDeposit=Number(payment.deposit_minor)-renterRefund;
+      if (releasedDeposit>0) await payments.setHold(payment.deposit_transfer_id,false);
+      if (Number(payment.rent_minor)-Number(payment.commission_minor)>0) await payments.setHold(payment.rental_transfer_id,false);
+      if (renterRefund>0) {
+        const providerPayment=await payments.findPayment(payment.provider_payment_id);
+        const alreadyRefunded=Number(providerPayment?.amount_refunded||0);
+        if (alreadyRefunded>renterRefund) fail(503,'The renter has already received more than the saved deposit refund. Reconcile with Razorpay.');
+        if (alreadyRefunded<renterRefund) await payments.refund(payment.provider_payment_id,renterRefund-alreadyRefunded);
+      }
+      const finishedAt=new Date().toISOString();
+      await query.transaction(async tx=>{
+        const changed=await tx("UPDATE requests SET status='resolved' WHERE id=? AND status='disputed'",bookingId);
+        if (!changed.changes) fail(409,'The booking changed before the decision could be recorded.');
+        const claimUpdate=await tx("UPDATE booking_claims SET status='resolved',resolved_at=? WHERE booking=? AND status='resolving'",finishedAt,bookingId);
+        if (!claimUpdate.changes) fail(409,'The claim resolution record changed.');
+        await tx("UPDATE protected_payments SET settlement_status='resolved',settlement_started_at=NULL,updated_at=? WHERE booking=? AND settlement_status='claim_resolving'",finishedAt,bookingId);
+        await tx("INSERT INTO booking_status_audit(booking,actor_user_id,old_status,new_status,occurred_at,metadata) VALUES(?,?,'disputed','resolved',?,?)",bookingId,user.id,finishedAt,JSON.stringify({decision,deductionMinor:deduction}));
+        await tx('INSERT INTO booking_claim_audit(booking,actor_user_id,event_type,event_data,occurred_at) VALUES(?,?,?,?,?)',bookingId,user.id,'resolved',JSON.stringify({decision,deductionMinor:deduction,reason}),finishedAt);
+        const events=[
+          ['transfer_reversal',renterRefund,payment.deposit_transfer_id,'claim-deposit-reversal'],
+          ['payout',releasedDeposit,payment.deposit_transfer_id,'claim-deposit-payout'],
+          ['claim_deduction',deduction,payment.deposit_transfer_id,'claim-deduction'],
+          ['release',Number(payment.rent_minor)-Number(payment.commission_minor),payment.rental_transfer_id,'claim-rent-release'],
+          ['payout',Number(payment.rent_minor)-Number(payment.commission_minor),payment.rental_transfer_id,'claim-rent-payout'],
+          ['refund',renterRefund,payment.provider_payment_id,'claim-deposit-refund']
+        ];
+        for (const [kind,amount,reference,key] of events) if (amount>0) await tx('INSERT INTO money_ledger(booking,event_type,amount_minor,currency,provider,provider_reference,idempotency_key,actor_user_id,metadata,occurred_at) VALUES(?,?,?,?,?,?,?,?,?,?)',bookingId,kind,amount,'INR','razorpay',reference,'booking:'+bookingId+':'+key,user.id,JSON.stringify({decision}),finishedAt);
+      });
+      return {ok:true,status:'resolved',decision,deductionMinor:deduction,refundedMinor:renterRefund};
+    } catch(error) {
+      await run("UPDATE protected_payments SET settlement_status='open',settlement_started_at=NULL,updated_at=? WHERE booking=? AND settlement_status='claim_resolving'",new Date().toISOString(),bookingId).catch(()=>{});
+      throw error;
+    }
+  }
   if (method === 'GET' && path === '/activity') return {
     listings: await all(listings + ' WHERE l.owner=? ORDER BY l.id DESC', user.id),
     saved: (await all('SELECT listing FROM saved WHERE "user"=?', user.id)).map(row => row.listing),
@@ -530,11 +646,21 @@ async function api(req, res, path) {
   const evidenceFile=path.match(/^\/requests\/(\d+)\/evidence\/([a-f0-9-]{36})$/i);
   if (method==='GET'&&evidenceFile) {
     const booking=Number(evidenceFile[1]);
-    if (!await get(threads+' WHERE r.id=? AND (r.requester=? OR l.owner=?)',booking,user.id,user.id)) fail(404,'Evidence unavailable.');
+    if (!admin&&!await get(threads+' WHERE r.id=? AND (r.requester=? OR l.owner=?)',booking,user.id,user.id)) fail(404,'Evidence unavailable.');
     const evidence=await get('SELECT storage_key,content_type FROM booking_evidence WHERE id=? AND booking=?',evidenceFile[2],booking);
     if (!evidence) fail(404,'Evidence unavailable.');
     const photo=await storage.get(evidence.storage_key);
     if (!photo) fail(404,'Evidence unavailable.');
+    return {binary:true,bytes:photo.bytes,contentType:evidence.content_type};
+  }
+  const claimEvidenceFile=path.match(/^\/requests\/(\d+)\/claim-evidence\/([a-f0-9-]{36})$/i);
+  if (method==='GET'&&claimEvidenceFile) {
+    const booking=Number(claimEvidenceFile[1]);
+    if (!admin&&!await get(threads+' WHERE r.id=? AND (r.requester=? OR l.owner=?)',booking,user.id,user.id)) fail(404,'Claim photo unavailable.');
+    const evidence=await get('SELECT storage_key,content_type FROM booking_claim_evidence WHERE id=? AND booking=?',claimEvidenceFile[2],booking);
+    if (!evidence) fail(404,'Claim photo unavailable.');
+    const photo=await storage.get(evidence.storage_key);
+    if (!photo) fail(404,'Claim photo unavailable.');
     return {binary:true,bytes:photo.bytes,contentType:evidence.content_type};
   }
   if (method==='GET'&&path==='/payment-account') return await get('SELECT account_id FROM owner_payment_accounts WHERE user_id=? AND provider=?',user.id,'razorpay')||{account_id:null};
@@ -687,17 +813,37 @@ async function api(req, res, path) {
       });
       return {ok:true,phase,lateFeeMinor};
     }
+    if (match[3]==='claim'&&method==='GET') {
+      return await get('SELECT owner_user_id,reason,status,renter_response,created_at,responded_at,resolved_at,resolution,resolution_reason,deduction_minor FROM booking_claims WHERE booking=?',id)||null;
+    }
     if (match[3]==='claim'&&method==='POST') {
       if (thread.owner!==user.id||thread.status!=='claim_window'||!thread.claim_deadline||Date.now()>Date.parse(thread.claim_deadline)) fail(409,'Owner claims can only be raised during the return claim window.');
-      const reason=field(await json(req),'reason',1000);
+      const body=await json(req),reason=field(body,'reason',1000),uploadId=field(body,'uploadId',36);
+      const upload=await get("SELECT storage_key,content_type FROM uploads WHERE id=? AND user_id=? AND purpose='booking-claim' AND consumed_at IS NULL AND created_at>?",uploadId,user.id,new Date(Date.now()-3600000).toISOString());
+      if (!upload) fail(400,'Upload a new supporting claim photo before submitting.');
       const now=new Date().toISOString();
       await query.transaction(async tx=>{
+        const used=await tx("UPDATE uploads SET consumed_at=? WHERE id=? AND user_id=? AND purpose='booking-claim' AND consumed_at IS NULL",now,uploadId,user.id);
+        if (!used.changes) fail(400,'That claim photo has already been used. Upload it again.');
         await tx('INSERT INTO booking_claims(booking,owner_user_id,reason,created_at) VALUES(?,?,?,?)',id,user.id,reason,now);
+        await tx('INSERT INTO booking_claim_evidence(id,booking,uploader_user_id,storage_key,content_type,uploaded_at) VALUES(?,?,?,?,?,?)',randomUUID(),id,user.id,upload.storage_key,upload.content_type,now);
+        await tx("INSERT INTO booking_claim_audit(booking,actor_user_id,event_type,event_data,occurred_at) VALUES(?,?,'claim_created',?,?)",id,user.id,JSON.stringify({reason}),now);
         const changed=await tx("UPDATE requests SET status='disputed' WHERE id=? AND status='claim_window'",id);
         if (!changed.changes) fail(409,'The claim window has closed.');
         await tx("INSERT INTO booking_status_audit(booking,actor_user_id,old_status,new_status,occurred_at,metadata) VALUES(?,?,'claim_window','disputed',?,?)",id,user.id,now,JSON.stringify({claim:true}));
       });
       return {ok:true,status:'disputed'};
+    }
+    if (match[3]==='claim'&&method==='PATCH') {
+      if (thread.requester!==user.id||thread.status!=='disputed') fail(409,'Only the renter can respond while a claim is open.');
+      const response=field(await json(req),'response',1200),now=new Date().toISOString();
+      const saved=await query.transaction(async tx=>{
+        const changed=await tx("UPDATE booking_claims SET renter_response=?,responded_at=? WHERE booking=? AND status='open' AND renter_response IS NULL",response,now,id);
+        if (!changed.changes) fail(409,'A response was already submitted or this claim is being reviewed.');
+        await tx("INSERT INTO booking_claim_audit(booking,actor_user_id,event_type,event_data,occurred_at) VALUES(?,?,'renter_response',?,?)",id,user.id,JSON.stringify({response}),now);
+        return true;
+      });
+      return {ok:saved};
     }
     if (match[3]==='contact'&&method==='GET') {
       if (!thread.is_gear||!['paid','active','returned','disputed','completed','resolved'].includes(thread.status)) fail(403,'Contact details are available to booking participants after confirmed payment.');
@@ -780,7 +926,7 @@ async function api(req, res, path) {
         if (!result.changes) fail(409,'You already reviewed this booking.');
         return {ok:true};
       }
-      if (thread.requester !== user.id || thread.status !== 'completed') fail(403, 'Only the customer can review a completed booking.');
+      if (thread.requester !== user.id || !['completed','resolved'].includes(thread.status)) fail(403, 'Only the customer can review a completed booking.');
       const body = await json(req);
       if (!Number.isInteger(body.score) || body.score < 1 || body.score > 5) fail(400, 'Choose a rating from 1 to 5.');
       const result = await run('INSERT INTO ratings(booking,score,comment) VALUES(?,?,?) ON CONFLICT DO NOTHING', id,body.score,field(body,'comment',500,false));

@@ -255,6 +255,40 @@ const migrations = [
         `);
       }
     }
+  },
+  {
+    version: 6,
+    name: 'claim response and resolution audit trail',
+    async up(context) {
+      await context.addColumn('booking_claims','deduction_minor','BIGINT');
+      await context.exec(`
+        CREATE TABLE IF NOT EXISTS booking_claim_audit(
+          id ${context.dialect==='postgres'?'BIGSERIAL':'INTEGER'} PRIMARY KEY, booking INTEGER NOT NULL, actor_user_id INTEGER,
+          event_type TEXT NOT NULL, event_data TEXT NOT NULL DEFAULT '{}', occurred_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS booking_claim_evidence(
+          id TEXT PRIMARY KEY, booking INTEGER NOT NULL, uploader_user_id INTEGER NOT NULL,
+          storage_key TEXT NOT NULL UNIQUE, content_type TEXT NOT NULL, uploaded_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS booking_claim_audit_booking ON booking_claim_audit(booking,id);
+        CREATE INDEX IF NOT EXISTS booking_claim_evidence_booking ON booking_claim_evidence(booking,uploaded_at);
+      `);
+      if (context.dialect==='sqlite') {
+        await context.exec(`
+          CREATE TRIGGER IF NOT EXISTS booking_claim_audit_no_update BEFORE UPDATE ON booking_claim_audit BEGIN SELECT RAISE(ABORT,'booking_claim_audit is append-only'); END;
+          CREATE TRIGGER IF NOT EXISTS booking_claim_audit_no_delete BEFORE DELETE ON booking_claim_audit BEGIN SELECT RAISE(ABORT,'booking_claim_audit is append-only'); END;
+          CREATE TRIGGER IF NOT EXISTS booking_claim_evidence_no_update BEFORE UPDATE ON booking_claim_evidence BEGIN SELECT RAISE(ABORT,'booking_claim_evidence is immutable'); END;
+          CREATE TRIGGER IF NOT EXISTS booking_claim_evidence_no_delete BEFORE DELETE ON booking_claim_evidence BEGIN SELECT RAISE(ABORT,'booking_claim_evidence is immutable'); END;
+        `);
+      } else {
+        await context.exec(`
+          DROP TRIGGER IF EXISTS booking_claim_audit_append_only ON booking_claim_audit;
+          CREATE TRIGGER booking_claim_audit_append_only BEFORE UPDATE OR DELETE ON booking_claim_audit FOR EACH ROW EXECUTE FUNCTION prevent_protected_rental_mutation();
+          DROP TRIGGER IF EXISTS booking_claim_evidence_immutable ON booking_claim_evidence;
+          CREATE TRIGGER booking_claim_evidence_immutable BEFORE UPDATE OR DELETE ON booking_claim_evidence FOR EACH ROW EXECUTE FUNCTION prevent_protected_rental_mutation();
+        `);
+      }
+    }
   }
 ];
 
@@ -275,7 +309,7 @@ function sqliteExecutor(db) {
 function postgresExecutor(client,pool) {
   const execute = async (sql,...args) => {
     let index = 0;
-    const qualified = sql.replace(/\b(FROM|JOIN|INTO|UPDATE|TABLE) (users|sessions|listings|saved|requests|messages|reports|ratings|demo_payments|email_verification_tokens|password_reset_tokens|booking_status_audit|money_ledger|marketplace_settings|uploads|schema_migrations|phone_otp_challenges|kyc_cases|kyc_access_audit|kyc_review_audit|owner_payment_accounts|protected_payments|payment_webhook_events|booking_evidence|booking_ratings|booking_late_fees|booking_claims)\b/g,'$1 neighbourlink.$2');
+  const qualified = sql.replace(/\b(FROM|JOIN|INTO|UPDATE|TABLE) (users|sessions|listings|saved|requests|messages|reports|ratings|demo_payments|email_verification_tokens|password_reset_tokens|booking_status_audit|money_ledger|marketplace_settings|uploads|schema_migrations|phone_otp_challenges|kyc_cases|kyc_access_audit|kyc_review_audit|owner_payment_accounts|protected_payments|payment_webhook_events|booking_evidence|booking_ratings|booking_late_fees|booking_claims|booking_claim_audit|booking_claim_evidence)\b/g,'$1 neighbourlink.$2');
     const result = await client.query(qualified.replaceAll('?',() => '$' + ++index),args);
     return { rows:result.rows, changes:result.rowCount };
   };

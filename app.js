@@ -132,9 +132,12 @@ submit(paymentAccountDialog,async form=>{
   toast('Payout account connected.');
 });
 const claimDialog=dialog('claim-dialog','Report an item issue',
-  '<label class="nl-field">What went wrong?<textarea name="reason" required maxlength="1000" rows="4"></textarea></label>');
+  '<label class="nl-field">What went wrong?<textarea name="reason" required maxlength="1000" rows="4"></textarea></label><label class="nl-field">Supporting photo<input name="photo" type="file" accept="image/jpeg,image/png,image/webp" required><span>Use a clear JPEG, PNG or WebP photo under 1 MB.</span></label>');
 submit(claimDialog,async form=>{
-  await api('/requests/'+threadId+'/claim','POST',{reason:form.get('reason')});
+  const photo=form.elements.photo.files[0];
+  if (!photo||photo.size>1000000||!['image/jpeg','image/png','image/webp'].includes(photo.type)) throw Error('Choose one JPEG, PNG or WebP photo under 1 MB.');
+  const uploadId=await uploadImage(photo,'booking-claim');
+  await api('/requests/'+threadId+'/claim','POST',{reason:form.get('reason'),uploadId});
   claimDialog.close();await refresh();await openThread(threadId);toast('Claim submitted for review.');
 });
 submit(review, async form => {
@@ -654,8 +657,31 @@ async function loadKycCenter() {
       const queue=await api('/admin/kyc');
       if (!user || !center.isConnected) return;
       center.innerHTML+='<h3>Identity review queue</h3>'+(queue.map(row=>'<article class="kyc-review"><strong>'+escape(row.name)+' · '+escape(row.email)+'</strong><p>'+escape(row.status)+' · submitted '+escape(row.submitted_at||'not submitted')+'</p>'+(row.submitted_at?'<p><a target="_blank" rel="noopener" href="/api/v1/admin/kyc/'+row.user_id+'/documents/id">Open ID image</a> · <a target="_blank" rel="noopener" href="/api/v1/admin/kyc/'+row.user_id+'/documents/selfie">Open selfie</a></p>':'')+'<label class="auth-field">Decision note<input data-kyc-reason="'+row.user_id+'" maxlength="500"></label><button class="btn" data-kyc-status="verified" data-user-id="'+row.user_id+'">Verify</button> <button class="btn" data-kyc-status="suspended" data-user-id="'+row.user_id+'">Suspend</button></article>').join('')||'<p>No identity submissions.</p>');
+      await loadAdminConsole(center);
     }
   } catch(error) { center.textContent='Identity verification is temporarily unavailable.'; }
+}
+async function loadAdminConsole(center) {
+  const root=document.createElement('section');root.className='admin-console';root.innerHTML='<h2>Marketplace operations</h2><p>Private admin workspace · sensitive documents are access-audited.</p><p>Loading reports, claims and money records…</p>';center.append(root);
+  try {
+    const [metrics,claims,users,listings,ledger]=await Promise.all([api('/admin/dashboard'),api('/admin/claims'),api('/admin/users'),api('/admin/listings'),api('/admin/ledger?limit=50')]);
+    if (!root.isConnected||!user?.admin) return;
+    const percent=value=>(Number(value||0)*100).toFixed(1)+'%';
+    const money=value=>'₹'+(Number(value||0)/100).toLocaleString('en-IN',{maximumFractionDigits:2});
+    const stats=[['Members',metrics.users.total],['Verified email + phone',metrics.users.verified],['Active listings',metrics.listings.active],['Paid rentals',metrics.rentals.captured],['Open claims',metrics.disputes.open],['Dispute rate',percent(metrics.disputes.rate)],['Loss rate',percent(metrics.disputes.lossRate)],['Repeat renter rate',percent(metrics.rentals.repeatRate)],['Commission recorded',money(metrics.revenueMinor)]];
+    const claimCards=claims.map(claim=>{
+      const evidence=[...claim.evidence.map(row=>({...row,label:row.phase+' photo',url:'/api/v1/requests/'+claim.booking+'/evidence/'+encodeURIComponent(row.id)})),...claim.claimEvidence.map(row=>({...row,label:'Owner claim photo',url:'/api/v1/requests/'+claim.booking+'/claim-evidence/'+encodeURIComponent(row.id)}))].map(row=>'<figure><a target="_blank" rel="noopener" href="'+row.url+'"><img loading="lazy" src="'+row.url+'" alt="'+escape(row.label)+' uploaded by '+escape(row.name)+'"></a><figcaption><strong>'+escape(row.label)+'</strong><br>'+escape(row.name)+' · '+escape(new Date(row.uploaded_at).toLocaleString())+'</figcaption></figure>').join('')||'<p>No booking photos.</p>';
+      const messages=claim.messages.map(row=>'<p><strong>'+escape(row.name)+'</strong> · '+escape(row.sent)+'<br>'+escape(row.body)+'</p>').join('')||'<p>No conversation messages.</p>';
+      const history=claim.statusHistory.map(row=>'<li>'+escape(row.old_status)+' → '+escape(row.new_status)+' · '+escape(row.occurred_at)+'</li>').join('');
+      const conditions=(()=>{try{return JSON.parse(claim.condition_checklist||'[]').map(escape).join(' · ')}catch{return ''}})();
+      const decision=claim.resolution==='resolving'?' · Saved decision: '+escape(claim.resolution)+' ('+money(claim.deduction_minor)+')':'';
+      return '<article class="admin-claim"><div class="nl-controls"><strong>Booking #'+claim.booking+' · '+escape(claim.claim_status)+'</strong><span>'+escape(claim.title)+' · '+escape(claim.start_date)+' to '+escape(claim.end_date)+'</span></div><p><strong>Owner:</strong> '+escape(claim.owner_name)+' ('+escape(claim.owner_email)+') · <strong>Renter:</strong> '+escape(claim.renter_name)+' ('+escape(claim.renter_email)+')</p><p><strong>Condition checklist:</strong> '+conditions+'</p><p><strong>Owner claim:</strong> '+escape(claim.reason)+'</p><p><strong>Renter response:</strong> '+escape(claim.renter_response||'Awaiting renter response')+'</p><p><strong>Deposit:</strong> '+money(claim.deposit_minor)+' · Payment '+escape(claim.payment_status||'unknown')+decision+' · Rent is settled separately.</p><details><summary>Claim, handover and return photo comparison</summary><div class="admin-evidence">'+evidence+'</div></details><details><summary>Conversation ('+claim.messages.length+')</summary>'+messages+'</details><details><summary>Booking history</summary><ol>'+history+'</ol></details><details><summary>Claim audit history</summary><ol>'+claim.claimHistory.map(row=>'<li>'+escape(row.event_type)+' · '+escape(row.occurred_at)+' · '+escape(row.event_data)+'</li>').join('')+'</ol></details>'+(claim.claim_status==='open'||claim.claim_status==='resolving'?'<div class="admin-resolution"><label class="auth-field">Deposit decision<select data-claim-decision="'+claim.booking+'"><option value="full_refund">Full deposit refund</option><option value="partial_deduction">Partial deposit deduction</option><option value="full_capture">Release full deposit to owner</option></select></label><label class="auth-field">Owner deduction in rupees<input data-claim-amount="'+claim.booking+'" type="number" min="0" step="0.01" max="'+(Number(claim.deposit_minor)/100)+'" value="0"></label><label class="auth-field">Decision note<input data-claim-reason="'+claim.booking+'" maxlength="800" value="'+escape(claim.resolution_reason||'')+'"></label><button class="btn primary" data-resolve-claim="'+claim.booking+'">'+(claim.claim_status==='resolving'?'Retry saved decision':'Resolve claim')+'</button></div>':'<p><strong>Decision:</strong> '+escape(claim.resolution||'')+' · '+escape(claim.resolution_reason||'')+'</p>')+'</article>';
+    }).join('')||'<p>No rental claims.</p>';
+    const userRows=users.map(row=>'<tr><td>'+escape(row.name)+'</td><td>'+escape(row.email)+'</td><td>'+escape(row.kyc_status||'unverified')+'</td><td>'+escape(row.completed_rentals)+'</td><td>'+escape(row.active_listings)+'</td></tr>').join('');
+    const listingRows=listings.map(row=>'<tr><td>'+escape(row.title)+'</td><td>'+escape(row.kind)+' · '+escape(row.category)+'</td><td>'+escape(row.owner_name)+'</td><td>'+escape(row.area)+'</td><td>'+Number(row.active?'1':'0')+'</td></tr>').join('');
+    const ledgerRows=ledger.map(row=>'<tr><td>'+escape(row.occurred_at)+'</td><td>#'+escape(row.booking??'—')+'</td><td>'+escape(row.event_type)+'</td><td>'+money(row.amount_minor)+'</td><td>'+escape(row.actor_name||'Automatic/provider')+'</td><td>'+escape(row.provider_reference||'—')+'</td></tr>').join('');
+    root.innerHTML='<h2>Marketplace operations</h2><p>Private admin workspace · sensitive identity document access is recorded.</p><div class="admin-metrics">'+stats.map(([label,value])=>'<article><strong>'+escape(value)+'</strong><span>'+escape(label)+'</span></article>').join('')+'</div><h3>Rental claims</h3><p>Compare private condition photos, conversation and status history before deciding. Deposit decisions do not change the separately held rent payout.</p>'+claimCards+'<h3>Members</h3><div class="admin-table-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Identity</th><th>Completed rentals</th><th>Active listings</th></tr></thead><tbody>'+userRows+'</tbody></table></div><h3>Listings</h3><div class="admin-table-wrap"><table><thead><tr><th>Item/service</th><th>Portal/category</th><th>Owner</th><th>Area</th><th>Active</th></tr></thead><tbody>'+listingRows+'</tbody></table></div><h3>Recent money ledger · last 50 entries</h3><div class="admin-table-wrap"><table><thead><tr><th>When</th><th>Booking</th><th>Event</th><th>Amount</th><th>Actor</th><th>Provider reference</th></tr></thead><tbody>'+ledgerRows+'</tbody></table></div>';
+  } catch(error) { if(root.isConnected) root.innerHTML='<h2>Marketplace operations</h2><p role="alert">Admin data could not be loaded: '+escape(error.message)+'</p>'; }
 }
 async function refresh() {
   [items,activity] = await Promise.all([
@@ -755,6 +781,21 @@ async function openThread(id) {
   }
   if (timeline.childElementCount) chat.append(timeline);
   const owner = thread.owner === user.id;
+  if (thread.kind==='gear'&&thread.status==='disputed') {
+    const claim=await api('/requests/'+id+'/claim');
+    if (claim) {
+      const panel=document.createElement('section');panel.className='nl-claim-summary';
+      const title=document.createElement('h3');title.textContent='Rental claim · '+claim.status;panel.append(title);
+      const reason=document.createElement('p');reason.textContent='Owner report: '+claim.reason;panel.append(reason);
+      if (claim.renter_response) {const response=document.createElement('p');response.textContent='Your response: '+claim.renter_response;panel.append(response);}
+      else if (!owner&&claim.status==='open') {
+        const form=document.createElement('form');form.className='claim-response';form.innerHTML='<label class="auth-field">Your response to the owner\'s report<textarea name="response" required maxlength="1200" rows="4"></textarea></label><button class="btn primary" type="submit">Send response</button><p class="nl-error" role="alert"></p>';
+        form.onsubmit=event=>{event.preventDefault();perform(async()=>{const button=form.querySelector('button');button.disabled=true;try{await api('/requests/'+id+'/claim','PATCH',{response:form.elements.response.value});await refresh();await openThread(id);}catch(error){form.querySelector('.nl-error').textContent=error.message;}finally{button.disabled=false;}});};panel.append(form);
+      }
+      if (claim.resolution) {const result=document.createElement('p');result.textContent='Admin decision: '+claim.resolution.replaceAll('_',' ')+' · '+(claim.resolution_reason||'');panel.append(result);}
+      chat.append(panel);
+    }
+  }
   if (thread.kind==='gear'&&['paid','active','claim_window','disputed'].includes(thread.status)) {
     let conditions=[];try{conditions=JSON.parse(thread.condition_checklist||'[]');if(!Array.isArray(conditions))conditions=[];}catch{}
     if (conditions.length) {const note=document.createElement('section'),title=document.createElement('strong'),list=document.createElement('ul');title.textContent='Compare against the listing condition';for(const condition of conditions){const row=document.createElement('li');row.textContent=condition;list.append(row);}note.append(title,list);chat.append(note);}
@@ -906,6 +947,13 @@ document.addEventListener('click', event => perform(async () => {
   if (data.moderate) {
     await api('/reports/' + data.moderate,'PATCH',{status:data.status});
     return refresh();
+  }
+  if (data.resolveClaim) {
+    const booking=Number(data.resolveClaim),decision=$('[data-claim-decision="'+booking+'"]').value;
+    const rupees=Number($('[data-claim-amount="'+booking+'"]').value||0);
+    if (!Number.isFinite(rupees)||rupees<0) throw Error('Enter a valid whole or decimal rupee amount.');
+    await api('/admin/claims/'+booking+'/resolve','POST',{decision,deductionMinor:Math.round(rupees*100),reason:$('[data-claim-reason="'+booking+'"]').value});
+    await refresh();return toast('Claim decision and payment ledger updated.');
   }
   if (data.kycStatus && data.userId) {
     const reason=$('[data-kyc-reason="'+data.userId+'"]').value;
