@@ -342,7 +342,7 @@ profileForm.addEventListener('submit',event => {
         const sent=await api('/phone-otp/send','POST',{});
         profileForm.hidden=true;
         phoneOtpForm.hidden=false;
-        $('#phone-otp-help').textContent='Enter the one-time code sent to ' + user.phone + '. It expires in 10 minutes.' + (sent.devCode ? ' Local development code: ' + sent.devCode : '');
+        $('#phone-otp-help').textContent=sent.devCode ? 'Local phone verification code: ' + sent.devCode + '. This code is separate from your email code and expires in 10 minutes.' : 'Enter the one-time code sent to ' + user.phone + '. It expires in 10 minutes.';
         phoneOtpForm.elements.code.focus();
         return;
       }
@@ -376,7 +376,8 @@ $('#phone-otp-resend').onclick=()=>perform(async()=>{
   $('#phone-otp-error').textContent='';
   try {
     const sent=await api('/phone-otp/send','POST',{});
-    $('#phone-otp-help').textContent='A new code was sent to ' + user.phone + '. It expires in 10 minutes.' + (sent.devCode ? ' Local development code: ' + sent.devCode : '');
+    phoneOtpForm.elements.code.value='';
+    $('#phone-otp-help').textContent=sent.devCode ? 'New local phone verification code: ' + sent.devCode + '. It expires in 10 minutes.' : 'A new code was sent to ' + user.phone + '. It expires in 10 minutes.';
   } catch(error) { $('#phone-otp-error').textContent=error.message; }
 });
 profileForm.elements.photoFile.addEventListener('change',() => {

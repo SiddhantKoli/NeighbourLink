@@ -572,8 +572,9 @@ async function api(req, res, path) {
     if (!profile?.phone || !/^\+?[1-9]\d{7,14}$/.test(profile.phone)) fail(400,'Save a valid phone number before requesting a code.');
     if (profile.phone_verified_at) return {ok:true,verified:true};
     const recent=await get("SELECT COUNT(*) AS count FROM phone_otp_challenges WHERE user_id=? AND created_at>?",user.id,new Date(Date.now()-3600000).toISOString());
-    if (Number(recent.count)>=3) fail(429,'You have requested several codes. Try again in an hour.');
-    const code=String(randomInt(0,1000000)).padStart(6,'0');
+    const localPhoneCode=process.env.NODE_ENV==='development'&&process.env.SMS_PROVIDER==='mock'&&process.env.ALLOW_DEV_OTP==='1';
+    if (!localPhoneCode && Number(recent.count)>=3) fail(429,'You have requested several codes. Try again in an hour.');
+    const code=localPhoneCode&&/^\d{6}$/.test(process.env.PHONE_OTP_DEV_CODE||'')?process.env.PHONE_OTP_DEV_CODE:String(randomInt(0,1000000)).padStart(6,'0');
     const id=randomUUID(),now=new Date(),expires=new Date(now.getTime()+10*60*1000).toISOString();
     await run('UPDATE phone_otp_challenges SET used_at=? WHERE user_id=? AND used_at IS NULL',now.toISOString(),user.id);
     await run('INSERT INTO phone_otp_challenges(id,user_id,phone,code_hash,expires_at,created_at) VALUES(?,?,?,?,?,?)',id,user.id,profile.phone,digest(id+':'+code),expires,now.toISOString());

@@ -30,6 +30,7 @@ Set `PORT` and `HOST` to change the listener, and `DB_PATH` to select a differen
 | `SMS_PROVIDER` | `twilio` for phone OTP delivery; the mock provider is limited to tests or explicit local development. |
 | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM` | Server-side Twilio credentials and sender for phone verification. |
 | `ALLOW_DEV_OTP` | Set to `1` only with `NODE_ENV=development` and `SMS_PROVIDER=mock` to display a local-only OTP. Never enable in production. |
+| `PHONE_OTP_DEV_CODE` | Optional fixed six-digit phone code for that local development mode. |
 | `KYC_ENCRYPTION_KEY` | Random 32-byte key encoded as 64 hex characters or base64. Required for government ID/selfie and business-registration document uploads; keep it separate from database and object-store backups. |
 | `KYC_PROVIDER` | `manual` for the built-in admin-review adapter. External identity providers are not wired yet. |
 | `PAYMENT_PROVIDER` | `razorpay` enables the TEST-mode payment adapter. Leave unset to disable checkout; `mock` is test-suite only. |
