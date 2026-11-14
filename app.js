@@ -122,6 +122,21 @@ const report = dialog('report-dialog','Report listing','<label class="nl-field">
 const review = dialog('review-dialog','Review your booking',
   '<label class="nl-field">Rating<select name="score"><option>5</option><option>4</option><option>3</option><option>2</option><option>1</option></select></label>' +
   '<label class="nl-field">Comment<textarea name="comment" maxlength="500"></textarea></label>');
+const paymentAccountDialog=dialog('payment-account-dialog','Connect a payout account',
+  '<p>Enter your activated Razorpay Route linked account ID. This is required before renters can pay.</p><label class="nl-field">Linked account ID<input name="accountId" required maxlength="40" placeholder="acc_…"></label>');
+submit(paymentAccountDialog,async form=>{
+  await api('/payment-account','PUT',{accountId:form.get('accountId')});
+  paymentAccountDialog.close();
+  await refresh();
+  if (threadId) await openThread(threadId);
+  toast('Payout account connected.');
+});
+const claimDialog=dialog('claim-dialog','Report an item issue',
+  '<label class="nl-field">What went wrong?<textarea name="reason" required maxlength="1000" rows="4"></textarea></label>');
+submit(claimDialog,async form=>{
+  await api('/requests/'+threadId+'/claim','POST',{reason:form.get('reason')});
+  claimDialog.close();await refresh();await openThread(threadId);toast('Claim submitted for review.');
+});
 submit(review, async form => {
   await api('/requests/' + threadId + '/rating','POST',{score:Number(form.get('score')),comment:form.get('comment')});
   review.close();
@@ -135,11 +150,20 @@ const booking = dialog('booking-dialog','Send a request',
   '<label class="nl-field"><span id="booking-date-label">Start date</span><input name="startDate" type="date" required></label>' +
   '<label class="nl-field">Return date<input name="endDate" type="date"></label>' +
   '<label class="nl-field"><span id="booking-details-label">Details</span><textarea name="details" maxlength="1000" rows="3"></textarea></label>');
+const bookingQuote=document.createElement('p');bookingQuote.className='nl-booking-quote';bookingQuote.setAttribute('aria-live','polite');
+booking.querySelector('form .nl-controls').before(bookingQuote);
+async function updateBookingQuote() {
+  const form=booking.querySelector('form');
+  if (!requestedListing||!form.elements.startDate.value||!form.elements.endDate.value) return;
+  try { const quote=await api('/listings/'+requestedListing+'/quote?startDate='+encodeURIComponent(form.elements.startDate.value)+'&endDate='+encodeURIComponent(form.elements.endDate.value));bookingQuote.textContent='Estimated rental ₹'+(quote.rentMinor/100).toLocaleString('en-IN')+' + refundable deposit ₹'+(quote.depositMinor/100).toLocaleString('en-IN')+' · '+quote.days+' day(s).'; }
+  catch(error) { bookingQuote.textContent=error.message; }
+}
 function openBooking(item) {
   const form = booking.querySelector('form');
   form.reset();
   requestedListing = item.id;
   const gear = item.kind === 'gear';
+  bookingQuote.textContent='Deposit adjusts to item value, account trust and rental duration.';
   $('#booking-dialog-title').textContent = gear ? 'Request gear rental' : 'Request local help';
   $('#booking-date-label').textContent = gear ? 'Pickup date' : 'Preferred appointment date';
   $('#booking-details-label').textContent = gear ? 'Pickup notes (optional)' : 'What do you need help with?';
@@ -147,17 +171,19 @@ function openBooking(item) {
   form.elements.endDate.parentElement.style.display = gear ? '' : 'none';
   form.elements.endDate.required = gear;
   form.elements.details.required = !gear;
-  form.elements.startDate.onchange = () => { form.elements.endDate.min = form.elements.startDate.value; };
+  form.elements.startDate.onchange = () => { form.elements.endDate.min = form.elements.startDate.value;updateBookingQuote(); };
+  form.elements.endDate.onchange=updateBookingQuote;
   form.elements.endDate.min = form.elements.startDate.min;
   booking.querySelector('.primary').textContent = 'Send request';
   show(booking);
 }
 submit(booking, async form => {
-  const {id} = await api('/requests/' + requestedListing,'PUT',Object.fromEntries(form));
+  const {id,depositMinor} = await api('/requests/' + requestedListing,'PUT',Object.fromEntries(form));
   booking.close();
   threadId = id;
   await refresh();
   await navigate('messages');
+  if (depositMinor) toast('Request sent. Estimated refundable deposit ₹'+(depositMinor/100).toLocaleString('en-IN')+'.');
 });
 
 async function api(path, method = 'GET', body) {
@@ -397,12 +423,25 @@ function changeCategories() {
   const valueField=$('#item-value-field');
   valueField.hidden=form.elements.kind.value!=='gear';
   valueField.querySelector('input').required=form.elements.kind.value==='gear';
+  $('#condition-field').hidden=form.elements.kind.value!=='gear';
+  $('#condition-field').querySelector('textarea').required=form.elements.kind.value==='gear';
+  $('#deposit-override-field').hidden=form.elements.kind.value!=='gear';
 }
 const itemValueField=document.createElement('div');
 itemValueField.id='item-value-field';
 itemValueField.className='field';
 itemValueField.innerHTML='<label for="item-value-input">Approximate item value (₹)</label><input id="item-value-input" name="itemValue" type="number" min="1" max="1000000000" step="1" placeholder="15000"><small>Used to limit risk for new renter accounts.</small>';
 listing.querySelector('[name="price"]').parentElement.after(itemValueField);
+const conditionField=document.createElement('div');
+conditionField.id='condition-field';
+conditionField.className='field';
+conditionField.innerHTML='<label for="condition-checklist">Condition checklist</label><textarea id="condition-checklist" name="conditionChecklistText" rows="3" maxlength="900" placeholder="Starts and runs normally&#10;No visible cracks&#10;Includes charger"></textarea><small>One condition per line. These points guide handover and return checks.</small>';
+itemValueField.after(conditionField);
+const depositOverrideField=document.createElement('div');
+depositOverrideField.id='deposit-override-field';
+depositOverrideField.className='field';
+depositOverrideField.innerHTML='<label for="deposit-override">Preferred deposit (₹, optional)</label><input id="deposit-override" name="depositOverride" type="number" min="1" max="10000000" step="1" placeholder="Calculated automatically"><small>The final amount is risk-adjusted and limited by marketplace settings.</small>';
+conditionField.after(depositOverrideField);
 $('#listing-location').onclick = () => perform(async () => {
   listingLocation = await locate();
   $('#listing-location-status').textContent = 'Approximate location added.';
@@ -441,8 +480,12 @@ submit(listing, async form => {
   const body = Object.fromEntries(form);
   const file = body.photo;
   body.price = Number(body.price);
-  if (body.kind==='gear') body.itemValueMinor=Math.round(Number(body.itemValue)*100);
-  delete body.itemValue;
+  if (body.kind==='gear') {
+    body.itemValueMinor=Math.round(Number(body.itemValue)*100);
+    body.conditionChecklist=String(body.conditionChecklistText||'').split('\n').map(value=>value.trim()).filter(Boolean);
+    if (body.depositOverride) body.depositOverrideMinor=Math.round(Number(body.depositOverride)*100);
+  }
+  delete body.itemValue;delete body.conditionChecklistText;delete body.depositOverride;
   if (listingLocation) Object.assign(body,listingLocation);
   if (!file.size) throw Error('Choose a photo of the item or your work.');
   if (file.size > 1000000 || !['image/jpeg','image/png','image/webp'].includes(file.type)) throw Error('Choose a JPEG, PNG, or WebP photo under 1 MB.');
@@ -466,10 +509,12 @@ submit(report, async form => {
 
 function card(item) {
   const saved = activity.saved.includes(item.id);
+  let conditions=[];try{conditions=JSON.parse(item.condition_checklist||'[]');if(!Array.isArray(conditions))conditions=[];}catch{}
+  const conditionText=conditions.length?'<p class="nl-condition-list"><strong>Condition at listing</strong><br>'+conditions.map(escape).join('<br>')+'</p>':'';
   return '<article class="card"><div class="card-art art-' + (item.kind === 'gear' ? 'tool' : 'drill') + '">' +
     (item.hasPhoto ? '<img class="nl-photo" loading="lazy" src="/photos/' + item.id + '" alt="' + escape(item.title) + '">' : '<span class="nl-no-photo">No photo uploaded</span>') +
     '<span class="tag">' + escape(item.category) + '</span><button class="heart" aria-label="' + (saved ? 'Remove from saved' : 'Save listing') + '" aria-pressed="' + saved + '" data-save="' + item.id + '">' + (saved ? '♥' : '♡') + '</button></div>' +
-    '<div class="card-body"><h3>' + escape(item.title) + '</h3><div class="meta">⌖ ' + escape(item.area) + '</div><p class="nl-description">' + escape(item.description) + '</p><div class="owner">' + escape(item.name) + '</div></div>' +
+    '<div class="card-body"><h3>' + escape(item.title) + '</h3><div class="meta">⌖ ' + escape(item.area) + '</div><p class="nl-description">' + escape(item.description) + '</p>'+conditionText+'<div class="owner">' + escape(item.name) + '</div></div>' +
     '<div class="card-foot"><div class="price"><strong>₹' + item.price.toLocaleString('en-IN') + '</strong> ' + (item.kind === 'gear' ? '/ DAY' : '/ JOB') + (item.kind==='gear'&&item.item_value_minor!=null?'<small class="item-value">Item value ₹'+Math.floor(item.item_value_minor/100).toLocaleString('en-IN')+'</small>':'') + '</div>' +
     (item.owner === user?.id ? '' : '<button data-request="' + item.id + '">REQUEST →</button>') +
     '</div><button class="btn" data-report="' + item.id + '">Report</button></article>';
@@ -710,59 +755,89 @@ async function openThread(id) {
   }
   if (timeline.childElementCount) chat.append(timeline);
   const owner = thread.owner === user.id;
-  if (thread.payment_status) chat.append(' · Demo payment ' + thread.payment_status);
-  if (!owner && thread.status === 'accepted') {
-    const pay = document.createElement('button');
-    pay.className = 'btn primary';
-    pay.textContent = thread.payment_status === 'succeeded' ? 'View demo receipt' : 'Demo checkout';
-    pay.onclick = () => perform(async () => {
-      const checkout = await api('/requests/' + id + '/checkout');
-      const panel = document.createElement('dialog');
-      panel.className = 'nl-dialog';
-      const heading = document.createElement('h2');
-      heading.textContent = 'Demo checkout';
-      const summary = document.createElement('p');
-      summary.textContent = 'Simulated payment. No money is collected. Total ₹' + (checkout.amount / 100).toLocaleString('en-IN') + ' for ' + checkout.days + (thread.kind === 'gear' ? ' calendar day(s).' : ' job.');
-      panel.append(heading,summary);
-      for (const outcome of checkout.status === 'succeeded' ? [] : ['succeeded','failed']) {
-        const action = document.createElement('button');
-        action.className = 'btn';
-        action.textContent = outcome === 'succeeded' ? 'Simulate success' : 'Simulate failure';
-        action.onclick = () => perform(async () => {
-          panel.querySelectorAll('button').forEach(button => button.disabled = true);
-          try {
-            await api('/requests/' + id + '/checkout','POST',{outcome});
-            panel.close();
-            await refresh();
-            await openThread(id);
-            toast(outcome === 'succeeded' ? 'Demo payment recorded.' : 'Demo payment failed. You can retry.');
-          } finally { panel.querySelectorAll('button').forEach(button => button.disabled = false); }
-        });
-        panel.append(action);
-      }
-      const close = document.createElement('button');
-      close.className = 'btn';
-      close.textContent = 'Close';
-      close.onclick = () => panel.close();
-      panel.append(close);
-      panel.addEventListener('close',() => panel.remove());
-      document.body.append(panel);
-      panel.showModal();
+  if (thread.kind==='gear'&&['paid','active','claim_window','disputed'].includes(thread.status)) {
+    let conditions=[];try{conditions=JSON.parse(thread.condition_checklist||'[]');if(!Array.isArray(conditions))conditions=[];}catch{}
+    if (conditions.length) {const note=document.createElement('section'),title=document.createElement('strong'),list=document.createElement('ul');title.textContent='Compare against the listing condition';for(const condition of conditions){const row=document.createElement('li');row.textContent=condition;list.append(row);}note.append(title,list);chat.append(note);}
+  }
+  if (thread.status==='claim_window'&&thread.claim_deadline) {const windowText=document.createElement('p');windowText.textContent='Owner claim window closes '+new Date(thread.claim_deadline).toLocaleString()+'.';chat.append(windowText);}
+  if (thread.payment_status) chat.append(' · Payment ' + thread.payment_status);
+  if (owner&&thread.kind==='gear'&&['requested','accepted'].includes(thread.status)) {
+    const payout=await api('/payment-account');
+    if (!payout.account_id) {
+      const connect=document.createElement('button');connect.className='btn';connect.textContent='Connect Razorpay Route account';connect.onclick=()=>show(paymentAccountDialog);chat.append(' ',connect);
+    }
+  }
+  if (!owner&&thread.kind==='gear'&&thread.status==='accepted') {
+    const pay=document.createElement('button');pay.className='btn primary';pay.textContent='Pay securely';
+    pay.onclick=()=>perform(async()=>{
+      const quote=await api('/requests/'+id+'/checkout');
+      if (quote.mode==='unavailable') throw Error('Payments are not enabled yet. Razorpay TEST credentials and Route approval are required.');
+      const summary=document.createElement('dialog');summary.className='nl-dialog';
+      summary.innerHTML='<h2>Protected rental payment</h2><p>Rental price: ₹'+(quote.rentAmount/100).toLocaleString('en-IN')+'</p><p>Refundable deposit: ₹'+(quote.depositAmount/100).toLocaleString('en-IN')+'</p><p>Checkout total: ₹'+(quote.amount/100).toLocaleString('en-IN')+'</p><p>Razorpay TEST MODE: no live payment is collected.</p><p>Razorpay processes payment and seller settlement. NeighbourLink does not hold customer money.</p><p role="alert" class="nl-error"></p><div class="nl-controls"><button class="btn primary" type="button" data-pay>Continue to Razorpay TEST</button><button class="btn" type="button" data-close>Cancel</button></div>';
+      document.body.append(summary);summary.showModal();
+      summary.querySelector('[data-close]').onclick=()=>summary.close();
+      summary.addEventListener('close',()=>summary.remove());
+      summary.querySelector('[data-pay]').onclick=()=>perform(async()=>{
+        const action=summary.querySelector('[data-pay]');action.disabled=true;
+        try {
+          const order=await api('/requests/'+id+'/checkout','POST',{});
+          if (!window.Razorpay) {
+            await new Promise((resolve,reject)=>{const script=document.createElement('script');script.src='https://checkout.razorpay.com/v1/checkout.js';script.onload=resolve;script.onerror=()=>reject(Error('Razorpay Checkout could not load.'));document.head.append(script);});
+          }
+          const checkout=new window.Razorpay({key:order.keyId,amount:order.amount,currency:order.currency,name:order.name,description:'Protected NeighbourLink rental',order_id:order.orderId,
+            handler:async response=>{try{await api('/requests/'+id+'/checkout/verify','POST',response);summary.close();await refresh();await openThread(id);toast('Payment confirmed. Upload handover photos with the owner.');}catch(error){summary.querySelector('.nl-error').textContent=error.message;}},
+            modal:{ondismiss:()=>{action.disabled=false;}}});
+          checkout.open();
+        } catch(error) { summary.querySelector('.nl-error').textContent=error.message;action.disabled=false; }
+      });
     });
     chat.append(' ',pay);
   }
+  if (thread.kind==='gear'&&['paid','active'].includes(thread.status)) {
+    const phase=thread.status==='paid'?'handover':'return';
+    const evidence=await api('/requests/'+id+'/evidence');
+    const mine=evidence.some(item=>item.phase===phase&&item.uploader_user_id===user.id);
+    const sides=evidence.filter(item=>item.phase===phase).length;
+    const progress=document.createElement('p');progress.textContent=(phase==='handover'?'Handover':'Return')+' photos: '+sides+'/2 sides uploaded.';chat.append(progress);
+    if (!mine) {
+      const field=document.createElement('label');field.className='btn';field.textContent='Choose '+(phase==='handover'?'handover':'return')+' photo';
+      const input=document.createElement('input');input.type='file';input.accept='image/jpeg,image/png,image/webp';input.setAttribute('capture','environment');input.setAttribute('aria-label','Choose timestamped '+phase+' evidence photo');field.append(input);
+      const upload=document.createElement('button');upload.className='btn primary';upload.textContent='Submit '+phase+' photo';
+      upload.onclick=()=>perform(async()=>{const file=input.files[0];if(!file)throw Error('Choose a photo first.');const uploadId=await uploadImage(file,'booking-'+phase);const result=await api('/requests/'+id+'/evidence','POST',{phase,uploadId});await refresh();await openThread(id);toast(result.lateFeeMinor?'Late fee ₹'+(result.lateFeeMinor/100).toLocaleString('en-IN')+' assessed from the refundable deposit.':sides===1?'Both sides confirmed. Booking status updated.':'Photo saved with its upload time.');});
+      chat.append(field,upload);
+    }
+  }
+  if (thread.kind==='gear'&&['paid','active','claim_window','disputed','completed','resolved'].includes(thread.status)) {
+    const bookingEvidence=await api('/requests/'+id+'/evidence');
+    if (bookingEvidence.length) {
+      const list=document.createElement('ul');
+      for (const entry of bookingEvidence) {
+        const row=document.createElement('li'),link=document.createElement('a');
+        link.href='/api/v1/requests/'+id+'/evidence/'+entry.id;link.target='_blank';link.rel='noopener';
+        link.textContent=entry.phase+' photo · '+entry.name+' · '+new Date(entry.uploaded_at).toLocaleString();row.append(link);list.append(row);
+      }
+      chat.append(list);
+    }
+    const contact=document.createElement('button');contact.className='btn';contact.textContent='View booking contact';contact.onclick=()=>perform(async()=>{const details=await api('/requests/'+id+'/contact');toast(details.name+' · '+details.phone);});chat.append(' ',contact);
+  }
+  if (thread.kind==='gear'&&owner&&thread.status==='claim_window') {
+    const claim=document.createElement('button');claim.className='btn primary';claim.textContent='Raise an item claim';claim.onclick=()=>show(claimDialog);chat.append(' ',claim);
+  }
   const transitions = {
     pending: owner ? ['accepted','declined'] : ['cancelled'],
-    accepted: owner ? [thread.kind === 'gear' ? 'active' : 'completion_proposed','cancelled'] : ['cancelled'],
-    active: owner ? [] : ['returned'],
-    returned: owner ? ['completed'] : [],
+    requested: owner ? ['accepted','declined'] : ['cancelled'],
+    accepted: owner ? (thread.kind==='gear'?[]:['completion_proposed','cancelled']) : ['cancelled'],
+    active: thread.kind==='gear'?[]:owner?[]:['returned'],
+    returned: thread.kind==='gear'?[]:owner?['completed']:[],
+    paid: ['cancelled'],claim_window:[],disputed:[],
     completion_proposed: owner ? [] : ['completed']
   };
   const states = transitions[thread.status] || [];
   const labels = {accepted:'Accept',declined:'Decline',active:'Record pickup',returned:'Mark returned',
     completion_proposed:'Propose completion',completed:thread.kind === 'gear' ? 'Confirm receipt' : 'Confirm completion',cancelled:'Cancel request'};
   if (thread.score) chat.append(' · Rating ' + thread.score + '/5');
-  if (!owner && thread.status === 'completed' && !thread.score) {
+  if (thread.kind==='gear'&&thread.otherScore) chat.append(' · Other side rated '+thread.otherScore+'/5');
+  if ((!owner||thread.kind==='gear')&&['completed','resolved'].includes(thread.status)&&!thread.score) {
     const button = document.createElement('button');
     button.className = 'btn';
     button.textContent = 'Leave a review';

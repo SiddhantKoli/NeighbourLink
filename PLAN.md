@@ -4,7 +4,8 @@
 
 - **Phase 0 — Foundation: implemented locally.** Versioned migrations, account email verification/recovery, private object storage adapters and legacy-image migration utility, append-only audit/ledger protections, CI, and SQLite backup/restore instructions are in place. SQLite is covered by tests; a live Supabase migration has not yet been verified.
 - **Phase 1 — Identity and trust: implemented locally.** SMS OTP delivery has a Twilio adapter and test mock; phone verification is required to finish signup. Manual KYC review stores app-encrypted ID/selfie images, exposes them only to the configured admin, and audits access and decisions. Trust scores use completed rentals and ratings received as an owner; new renters are capped by a settings-driven gear item-value tier. External KYC providers and mutual renter reviews remain future work.
-- Phases 2–5 remain in the ordered plan below. Continue only after the prior phase has been tested and summarized.
+- **Phase 2 — Protected rental flow: implemented locally.** Gear listings now require a condition checklist. Deposit quotes apply settings-backed item-value, category, renter-trust and duration multipliers, clamp to configured bounds, and constrain owner overrides. The booking flow uses requested/accepted/paid/active/claim_window/completed plus cancelled/disputed states, two-sided private evidence, verified test-mode Razorpay order checkout/webhooks, append-only money events, post-payment contacts, mutual reviews, a free-cancel cutoff, automatic late-fee payout from the deposit, and no-claim deposit release/refund. Automated tests cover the SQLite path. Razorpay TEST credentials, Route product approval, activated seller linked accounts and provider dashboard/webhook verification remain external setup gates; no real-money or live-key path is enabled.
+- Phases 3–5 remain in the ordered plan below. Phase 3 is next.
 - The supplied Phase 5 text is incomplete; it ends at “Subscription plans.”
 
 ## Starting architecture (before implementation)
@@ -35,11 +36,7 @@
 
 ### Phase 2 — Protected rental flow
 
-1. Listings lack item value and condition checklist fields; there is no deposit policy or owner override.
-2. Simulated checkout must be replaced by a TEST-mode Razorpay or Cashfree adapter. The platform must not hold customer funds; payment authorization/capture/release and payout behavior must be supported by the chosen provider and settlement model.
-3. No append-only ledger entries, provider webhook idempotency, or automated refund/claim-window jobs.
-4. Booking states do not represent paid, handover-confirmed, claim-window, disputed, or resolved states. Current transitions need a formal state machine and audit events.
-5. No paired timestamped handover/return photos, owner claims, contact-release rule, automatic late fee, or mutual reviews.
+Implemented locally as described above. Phase 3 still needs renter claim responses, protected admin decisions that split/reverse/refund held funds, photo comparison, and operational/payment reconciliation. Razorpay Route must approve NeighbourLink's model before any pilot that processes provider payments.
 
 ### Phase 3 — Disputes and administration
 

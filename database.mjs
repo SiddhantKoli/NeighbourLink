@@ -178,6 +178,83 @@ const migrations = [
         `);
       }
     }
+  },
+  {
+    version: 5,
+    name: 'protected rentals, provider payments, evidence, and mutual reviews',
+    async up(context) {
+      await context.addColumn('listings','condition_checklist',"TEXT NOT NULL DEFAULT '[]'");
+      await context.addColumn('listings','deposit_override_minor','BIGINT');
+      await context.addColumn('requests','deposit_minor','BIGINT');
+      await context.addColumn('requests','risk_multiplier','REAL');
+      await context.addColumn('requests','claim_deadline','TEXT');
+      await context.addColumn('requests','due_at','TEXT');
+      await context.exec(`
+        CREATE TABLE IF NOT EXISTS owner_payment_accounts(
+          user_id INTEGER PRIMARY KEY, provider TEXT NOT NULL, account_id TEXT NOT NULL UNIQUE,
+          verified_at TEXT NOT NULL, created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS protected_payments(
+          booking INTEGER PRIMARY KEY, provider TEXT NOT NULL, provider_order_id TEXT NOT NULL UNIQUE,
+          provider_payment_id TEXT UNIQUE, payment_status TEXT NOT NULL, amount_minor BIGINT NOT NULL,
+          rent_minor BIGINT NOT NULL, deposit_minor BIGINT NOT NULL, commission_minor BIGINT NOT NULL,
+          rental_transfer_id TEXT, deposit_transfer_id TEXT, settlement_status TEXT NOT NULL DEFAULT 'open', settlement_started_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS payment_webhook_events(
+          event_id TEXT PRIMARY KEY, event_type TEXT NOT NULL, received_at TEXT NOT NULL, processed_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS booking_evidence(
+          id TEXT PRIMARY KEY, booking INTEGER NOT NULL, uploader_user_id INTEGER NOT NULL,
+          phase TEXT NOT NULL CHECK(phase IN ('handover','return')), storage_key TEXT NOT NULL UNIQUE,
+          content_type TEXT NOT NULL, uploaded_at TEXT NOT NULL, UNIQUE(booking,uploader_user_id,phase)
+        );
+        CREATE INDEX IF NOT EXISTS booking_evidence_booking_phase ON booking_evidence(booking,phase);
+        CREATE TABLE IF NOT EXISTS booking_ratings(
+          id INTEGER PRIMARY KEY, booking INTEGER NOT NULL, rater_user_id INTEGER NOT NULL,
+          ratee_user_id INTEGER NOT NULL, score INTEGER NOT NULL CHECK(score BETWEEN 1 AND 5),
+          comment TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, UNIQUE(booking,rater_user_id)
+        );
+        CREATE TABLE IF NOT EXISTS booking_late_fees(
+          booking INTEGER PRIMARY KEY, amount_minor BIGINT NOT NULL, assessed_at TEXT NOT NULL,
+          owner_transfer_id TEXT, status TEXT NOT NULL DEFAULT 'assessed'
+        );
+        CREATE TABLE IF NOT EXISTS booking_claims(
+          booking INTEGER PRIMARY KEY, owner_user_id INTEGER NOT NULL, reason TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'open', renter_response TEXT, created_at TEXT NOT NULL,
+          responded_at TEXT, resolved_at TEXT, resolution TEXT, resolution_reason TEXT, resolver_user_id INTEGER
+        );
+      `);
+      const now=new Date().toISOString();
+      const defaults=[
+        ['deposit_category_multiplier_default','1','Placeholder: default category risk multiplier.'],
+        ['deposit_category_multiplier_tools','1.1','Placeholder: Tools category risk multiplier.'],
+        ['deposit_category_multiplier_tech','1.2','Placeholder: Tech and Camera category risk multiplier.'],
+        ['deposit_category_multiplier_outdoors','1.05','Placeholder: Outdoors category risk multiplier.'],
+        ['deposit_duration_multiplier_7_days','1.1','Placeholder: additional multiplier for rentals longer than 7 days.'],
+        ['deposit_long_duration_days','7','Placeholder: rental duration threshold that increases deposit risk.'],
+        ['max_rental_days','30','Placeholder: maximum length for a single Gear rental.'],
+        ['deposit_owner_override_max_percent','50','Placeholder: maximum bounded owner adjustment percentage.'],
+        ['cancellation_free_hours','24','Placeholder: hours before pickup with no cancellation fee.'],
+        ['late_fee_grace_hours','0','Placeholder: late-return grace hours.']
+      ];
+      for (const [key,value,description] of defaults) await context.query('INSERT INTO marketplace_settings(setting_key,setting_value,description,updated_at) VALUES(?,?,?,?) ON CONFLICT(setting_key) DO NOTHING',key,value,description,now);
+      if (context.dialect==='sqlite') {
+        await context.exec(`
+          CREATE TRIGGER IF NOT EXISTS payment_webhook_events_no_update BEFORE UPDATE ON payment_webhook_events BEGIN SELECT RAISE(ABORT,'payment_webhook_events is append-only'); END;
+          CREATE TRIGGER IF NOT EXISTS payment_webhook_events_no_delete BEFORE DELETE ON payment_webhook_events BEGIN SELECT RAISE(ABORT,'payment_webhook_events is append-only'); END;
+          CREATE TRIGGER IF NOT EXISTS booking_evidence_no_update BEFORE UPDATE ON booking_evidence BEGIN SELECT RAISE(ABORT,'booking_evidence is immutable'); END;
+          CREATE TRIGGER IF NOT EXISTS booking_evidence_no_delete BEFORE DELETE ON booking_evidence BEGIN SELECT RAISE(ABORT,'booking_evidence is immutable'); END;
+        `);
+      } else {
+        await context.exec(`
+          CREATE OR REPLACE FUNCTION prevent_protected_rental_mutation() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION '% is immutable', TG_TABLE_NAME; END; $$;
+          DROP TRIGGER IF EXISTS payment_webhook_events_append_only ON payment_webhook_events;
+          CREATE TRIGGER payment_webhook_events_append_only BEFORE UPDATE OR DELETE ON payment_webhook_events FOR EACH ROW EXECUTE FUNCTION prevent_protected_rental_mutation();
+          DROP TRIGGER IF EXISTS booking_evidence_immutable ON booking_evidence;
+          CREATE TRIGGER booking_evidence_immutable BEFORE UPDATE OR DELETE ON booking_evidence FOR EACH ROW EXECUTE FUNCTION prevent_protected_rental_mutation();
+        `);
+      }
+    }
   }
 ];
 
@@ -198,7 +275,7 @@ function sqliteExecutor(db) {
 function postgresExecutor(client,pool) {
   const execute = async (sql,...args) => {
     let index = 0;
-    const qualified = sql.replace(/\b(FROM|JOIN|INTO|UPDATE|TABLE) (users|sessions|listings|saved|requests|messages|reports|ratings|demo_payments|email_verification_tokens|password_reset_tokens|booking_status_audit|money_ledger|marketplace_settings|uploads|schema_migrations|phone_otp_challenges|kyc_cases|kyc_access_audit|kyc_review_audit)\b/g,'$1 neighbourlink.$2');
+    const qualified = sql.replace(/\b(FROM|JOIN|INTO|UPDATE|TABLE) (users|sessions|listings|saved|requests|messages|reports|ratings|demo_payments|email_verification_tokens|password_reset_tokens|booking_status_audit|money_ledger|marketplace_settings|uploads|schema_migrations|phone_otp_challenges|kyc_cases|kyc_access_audit|kyc_review_audit|owner_payment_accounts|protected_payments|payment_webhook_events|booking_evidence|booking_ratings|booking_late_fees|booking_claims)\b/g,'$1 neighbourlink.$2');
     const result = await client.query(qualified.replaceAll('?',() => '$' + ++index),args);
     return { rows:result.rows, changes:result.rowCount };
   };

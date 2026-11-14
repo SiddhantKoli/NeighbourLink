@@ -31,10 +31,19 @@ Set `PORT` and `HOST` to change the listener, and `DB_PATH` to select a differen
 | `ALLOW_DEV_OTP` | Set to `1` only with `NODE_ENV=development` and `SMS_PROVIDER=mock` to display a local-only OTP. Never enable in production. |
 | `KYC_ENCRYPTION_KEY` | Random 32-byte key encoded as 64 hex characters or base64. Required for government ID/selfie submissions; keep it separate from database and object-store backups. |
 | `KYC_PROVIDER` | `manual` for the built-in admin-review adapter. External identity providers are not wired yet. |
+| `PAYMENT_PROVIDER` | `razorpay` enables the TEST-mode payment adapter. Leave unset to disable checkout; `mock` is test-suite only. |
+| `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET` | Server-side Razorpay TEST API credentials. The app rejects live keys. |
+| `RAZORPAY_WEBHOOK_SECRET` | TEST webhook signing secret configured for `/api/v1/webhooks/razorpay`. |
 | `DB_PATH` | SQLite database file. |
 | `PORT`, `HOST` | HTTP listener settings. |
 
 Email verification and password recovery require a configured Resend sender outside tests. Phone verification requires configured Twilio credentials; only local development with `NODE_ENV=development`, `SMS_PROVIDER=mock`, and `ALLOW_DEV_OTP=1` may display a test code. New photos are checked for JPEG, PNG, or WebP content and limited to 1 MB. Production should use a private S3-compatible bucket and configure server credentials. Do not expose the bucket publicly; image reads pass through the authenticated application.
+
+### Razorpay TEST payments
+
+Gear checkout is disabled until `PAYMENT_PROVIDER=razorpay`, Razorpay TEST keys, and a webhook secret are configured. The payment adapter rejects live keys. Razorpay Route must separately approve the marketplace use case and activate each seller's linked account; sellers then connect that account ID in their booking conversation. Checkout sends the rental and refundable deposit as separate settlement-on-hold transfers to the seller's linked account. The platform retains only its configured commission. A Route settlement hold is a provider timing control, not escrow or a guarantee of reimbursement. After the claim window, the app releases the rental transfer, reverses the deposit transfer, routes any assessed late fee to the seller, and refunds the remaining deposit. Disputed deposits stay frozen for admin review. Use Razorpay's TEST dashboard/webhooks and keep all keys server-side.
+
+For local development without provider access, `PAYMENT_PROVIDER` may remain unset and protected checkout displays as unavailable. The mock adapter is only enabled by the automated test suite; it cannot collect money or be used by a running development/production server.
 
 On Windows, generate the KYC encryption key in PowerShell with `$bytes = New-Object byte[] 32; $rng = [Security.Cryptography.RandomNumberGenerator]::Create(); $rng.GetBytes($bytes); [BitConverter]::ToString($bytes).Replace('-', '')`, then put the result in `.env`. Back up this key separately and restrict access; losing it makes previously stored identity images unreadable.
 
@@ -44,7 +53,7 @@ Set `DATABASE_URL` to the project's server-side Session pooler connection string
 
 ## Migrations, settings, and data safety
 
-Database changes run as ordered, transactional migrations recorded in `schema_migrations`. New marketplace values are seeded into `marketplace_settings`; current values are placeholders and must be validated with real users before commercial use. Booking status changes are recorded in append-only `booking_status_audit`; money events are recorded in append-only `money_ledger`. The old demo checkout remains a demonstration flow until the protected-rental payment phase replaces it with a provider test-mode adapter. Never treat demo checkout as a real payment.
+Database changes run as ordered, transactional migrations recorded in `schema_migrations`. New marketplace values are seeded into `marketplace_settings`; current values are placeholders and must be validated with real users before commercial use. Booking status changes are recorded in append-only `booking_status_audit`; money events are recorded in append-only `money_ledger`. Gear checkout now uses the provider TEST adapter, while the legacy `demo_payments` table is retained only so existing installations can migrate without deleting historical records. It is no longer used by the application. Never treat test-mode checkout as a real payment.
 
 ### SQLite backup and restore
 
@@ -72,9 +81,10 @@ The browser and a future desktop app can use the same versioned API. For an Elec
 
 - Separate Gear and Hire portals, with owner listing photos and neighbourhood text search.
 - Listings can be saved, reported, and requested with rental dates or a preferred service date.
-- Owners approve requests; participants have a private conversation and can leave a rating after completion.
+- Owners approve requests; participants have a private conversation and can leave mutual ratings after Gear bookings complete.
 - Account creation requires email verification and a complete profile with a validated phone number and profile photo.
 - Phone numbers are verified using single-use, rate-limited SMS codes. Gear listings include item value; new renters are limited to lower-value items until they build rental history and ratings.
+- Gear listings include a condition checklist and calculated refundable deposit. Both renter and owner submit private pickup and return photos; phone contact becomes visible only after payment. Paid bookings include a settings-governed cancellation window, claim window and late-fee assessment.
 - Optional government ID and selfie review uses encrypted image storage, restricted admin access, reviewer decision states, and an access audit. Reviewed documents are removed after the settings-driven retention period (currently a 90-day placeholder); pending reviews remain available until decided. NeighbourLink does not ask for Aadhaar numbers.
 - Password recovery uses single-use, expiring email links.
 - Admin reports and booking history are available to authorized accounts.
@@ -82,6 +92,6 @@ The browser and a future desktop app can use the same versioned API. For an Elec
 
 ## Scope and release gates
 
-The current release remains a marketplace pilot, not a production payment or escrow service. Next roadmap phases add verified phone/KYC trust, protected rentals and provider test-mode payments, disputes, availability/search, notifications, and business accounts. Money must never be held by NeighbourLink. Payment, deposit, claim-window, and fee settings are placeholders until validated with real users and reviewed for applicable law.
+The current release remains a marketplace pilot, not a production payment or escrow service. Gear now has condition checklists, trust-adjusted deposits, test-mode Razorpay Route settlement holds, two-sided timestamped evidence, automatic no-claim deposit reversal/refund, late-fee assessment, and mutual reviews. Route approval, activated linked accounts, external provider end-to-end verification, and Phase 3 dispute resolution remain release prerequisites. Money must never be held by NeighbourLink. Payment, deposit, claim-window, and fee settings are placeholders until validated with real users and reviewed for applicable law.
 
 The supplied Phase 5 checklist ends at “Subscription plans”; provide the remaining bullets before that phase is scoped.

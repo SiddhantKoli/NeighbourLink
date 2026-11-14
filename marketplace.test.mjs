@@ -9,7 +9,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 test('marketplace permissions, requests, messages, and moderation', async t => {
   const child = spawn(process.execPath, ['server.mjs'], {
-    env: {...process.env, DATABASE_URL:'', DB_PATH:':memory:', PORT:'0', HOST:'127.0.0.1', NODE_ENV:'test', EMAIL_PROVIDER:'mock', SMS_PROVIDER:'mock', KYC_ENCRYPTION_KEY:'ab'.repeat(32), OBJECT_STORAGE_MODE:'memory', ADMIN_EMAIL:'admin@example.test', ADMIN_SIGNUP_CODE:'local-test-code'},
+    env: {...process.env, DATABASE_URL:'', DB_PATH:':memory:', PORT:'0', HOST:'127.0.0.1', NODE_ENV:'test', EMAIL_PROVIDER:'mock', SMS_PROVIDER:'mock', PAYMENT_PROVIDER:'mock', KYC_ENCRYPTION_KEY:'ab'.repeat(32), OBJECT_STORAGE_MODE:'memory', ADMIN_EMAIL:'admin@example.test', ADMIN_SIGNUP_CODE:'local-test-code'},
     stdio:['ignore','pipe','inherit']
   });
   t.after(() => child.kill());
@@ -106,22 +106,29 @@ test('marketplace permissions, requests, messages, and moderation', async t => {
   assert.equal((await owner('/session')).kycStatus,'verified');
   assert.deepEqual(await admin('/__test/kyc-audit'),{access:1,reviews:1});
   const listingPhoto=await owner.upload('listing');
+  assert.deepEqual(await owner('/payment-account'),{account_id:null});
+  await borrower('/payment-account',400,'PUT',{accountId:'not-a-linked-account'});
   await owner.badUpload();
-  const listing = await owner('/listings',200,'POST',{title:'Drill',kind:'gear',category:'Tools',price:200,itemValueMinor:1500000,area:'Bengaluru',description:'Cordless drill',photoUploadId:listingPhoto});
+  await owner('/listings',400,'POST',{title:'Invalid deposit override',kind:'gear',category:'Tools',price:200,itemValueMinor:1500000,conditionChecklist:['Starts normally'],depositOverrideMinor:10000000,area:'Bengaluru',description:'Test',photoUploadId:listingPhoto});
+  const listing = await owner('/listings',200,'POST',{title:'Drill',kind:'gear',category:'Tools',price:200,itemValueMinor:1500000,conditionChecklist:['Starts normally','Battery included'],area:'Bengaluru',description:'Cordless drill',photoUploadId:listingPhoto});
   const photoResponse=await fetch(origin + '/photos/' + listing.id);
   assert.equal(photoResponse.status,200);
   assert.equal(photoResponse.headers.get('content-type'),'image/jpeg');
   assert.equal((await photoResponse.arrayBuffer()).byteLength,4);
   await outsider('/listings/' + listing.id,404,'DELETE');
+  await owner('/payment-account',200,'PUT',{accountId:'acc_test_owner'});
   await borrower('/saved/' + listing.id,200,'PUT');
   assert.deepEqual((await borrower('/activity')).saved,[listing.id]);
   assert.deepEqual((await owner('/activity')).saved,[]);
   const dates = { startDate:'2099-06-10', endDate:'2099-06-12', details:'Pickup at noon' };
   const highValuePhoto=await owner.upload('listing');
-  const highValue=await owner('/listings',200,'POST',{title:'Workshop lathe',kind:'gear',category:'Tools',price:900,itemValueMinor:3000000,area:'Bengaluru',description:'Precision lathe',photoUploadId:highValuePhoto});
+  const highValue=await owner('/listings',200,'POST',{title:'Workshop lathe',kind:'gear',category:'Tools',price:900,itemValueMinor:3000000,conditionChecklist:['Spindle runs smoothly'],area:'Bengaluru',description:'Precision lathe',photoUploadId:highValuePhoto});
   await borrower('/requests/' + highValue.id,403,'PUT',dates);
   const request = await borrower('/requests/' + listing.id,200,'PUT',dates);
   assert.deepEqual(await borrower('/requests/' + listing.id,200,'PUT',dates),request);
+  assert.ok(request.depositMinor>0);
+  assert.equal((await borrower('/listings/'+listing.id+'/quote?startDate='+dates.startDate+'&endDate='+dates.endDate)).depositMinor,request.depositMinor);
+  await borrower('/listings/'+listing.id+'/quote?startDate=2099-06-10&endDate=2099-07-20',400);
   const path = '/requests/' + request.id;
   await outsider(path + '/messages',404);
   await borrower(path,409,'PATCH',{status:'accepted'});
@@ -129,19 +136,69 @@ test('marketplace permissions, requests, messages, and moderation', async t => {
   assert.equal((await owner(path + '/messages'))[0].body,'Can I pick this up Saturday?');
   await owner(path,200,'PATCH',{status:'accepted'});
   const acceptanceAudit = await owner(path + '/audit');
-  assert.equal(acceptanceAudit.length,1);
-  assert.equal(acceptanceAudit[0].old_status,'pending');
-  assert.equal(acceptanceAudit[0].new_status,'accepted');
-  assert.equal(acceptanceAudit[0].actor_user_id,1);
+  assert.equal(acceptanceAudit.length,2);
+  assert.equal(acceptanceAudit[0].old_status,'none');
+  assert.equal(acceptanceAudit[1].old_status,'requested');
+  assert.equal(acceptanceAudit[1].new_status,'accepted');
+  assert.equal(acceptanceAudit[1].actor_user_id,1);
   await outsider(path + '/checkout',404);
   await owner(path + '/checkout',403,'POST',{outcome:'succeeded'});
-  await borrower(path + '/checkout',200,'POST',{outcome:'failed'});
-  assert.equal((await borrower(path + '/checkout')).status,'failed');
-  await borrower(path + '/checkout',200,'POST',{outcome:'succeeded'});
-  await borrower(path + '/checkout',200,'POST',{outcome:'failed'});
-  const receipt = await borrower(path + '/checkout');
-  assert.equal(receipt.status,'succeeded');
-  assert.equal(receipt.amount,60000);
+  await borrower(path+'/contact',403);
+  const quote=await borrower(path+'/checkout');
+  assert.equal(quote.rentAmount,60000);
+  const order=await borrower(path+'/checkout',200,'POST',{});
+  assert.equal((await borrower(path+'/checkout',200,'POST',{})).orderId,order.orderId);
+  await borrower(path+'/checkout/verify',400,'POST',{razorpay_order_id:order.orderId,razorpay_payment_id:'pay_test_'+request.id,razorpay_signature:'bad'});
+  await borrower(path+'/checkout/verify',200,'POST',{razorpay_order_id:order.orderId,razorpay_payment_id:'pay_test_'+request.id,razorpay_signature:'test-signature:'+order.orderId+':pay_test_'+request.id});
+  assert.equal((await borrower('/activity')).threads.find(row=>row.id===request.id).status,'paid');
+  assert.equal((await borrower(path+'/contact')).phone,'+919876543210');
+  assert.equal((await owner(path+'/contact')).phone,'+919876543210');
+  const webhookBody=JSON.stringify({event:'payment.captured',payload:{payment:{entity:{id:'pay_test_'+request.id,order_id:order.orderId}}}});
+  const invalidWebhook=await fetch(origin+'/api/v1/webhooks/razorpay',{method:'POST',headers:{'Content-Type':'application/json','X-Razorpay-Signature':'invalid','X-Razorpay-Event-Id':'evt_bad'},body:webhookBody});
+  assert.equal(invalidWebhook.status,400);
+  const sendWebhook=()=>fetch(origin+'/api/v1/webhooks/razorpay',{method:'POST',headers:{'Content-Type':'application/json','X-Razorpay-Signature':'mock-signature','X-Razorpay-Event-Id':'evt_'+request.id},body:webhookBody});
+  assert.equal((await sendWebhook()).status,200);
+  assert.equal((await (await sendWebhook()).json()).duplicate,true);
+  for (const [client,purpose] of [[owner,'booking-handover'],[borrower,'booking-handover']]) {
+    const uploadId=await client.upload(purpose);
+    await client(path+'/evidence',200,'POST',{phase:'handover',uploadId});
+  }
+  assert.equal((await borrower('/activity')).threads.find(row=>row.id===request.id).status,'active');
+  await borrower('/__test/booking-late/'+request.id+'/expire',200,'POST',{});
+  for (const [client,purpose] of [[owner,'booking-return'],[borrower,'booking-return']]) {
+    const uploadId=await client.upload(purpose);
+    await client(path+'/evidence',200,'POST',{phase:'return',uploadId});
+  }
+  assert.equal((await borrower('/activity')).threads.find(row=>row.id===request.id).status,'claim_window');
+  assert.equal((await borrower('/__test/claim-window/'+request.id+'/expire',200,'POST',{})).status,'completed');
+  await owner(path+'/claim',409,'POST',{reason:'The claim window is already closed.'});
+  await borrower(path+'/rating',200,'POST',{score:5,comment:'Returned in good condition'});
+  await owner(path+'/rating',200,'POST',{score:4,comment:'Good renter'});
+  const evidence = await borrower(path+'/evidence');
+  assert.equal(evidence.length,4);
+  const privateEvidence=await fetch(origin+'/api/v1/requests/'+request.id+'/evidence/'+evidence[0].id,{headers:{cookie:borrower.cookie()}});
+  assert.equal(privateEvidence.status,200);
+  const privateEvidenceDenied=await fetch(origin+'/api/v1/requests/'+request.id+'/evidence/'+evidence[0].id,{headers:{cookie:outsider.cookie()}});
+  assert.equal(privateEvidenceDenied.status,404);
+  const ledger=await owner('/__test/ledger/'+request.id);
+  assert.ok(ledger.some(row=>row.event_type==='capture'));
+  assert.equal(ledger.filter(row=>row.event_type==='hold').length,2);
+  assert.ok(ledger.some(row=>row.event_type==='commission'));
+  assert.ok(ledger.some(row=>row.event_type==='payout'));
+  assert.ok(ledger.some(row=>row.event_type==='late_fee_assessed'));
+  assert.ok(ledger.some(row=>row.event_type==='late_fee_payout'));
+  assert.ok(ledger.some(row=>row.event_type==='refund'));
+  const cancellationPhoto=await owner.upload('listing');
+  const cancellationListing=await owner('/listings',200,'POST',{title:'Spare drill',kind:'gear',category:'Tools',price:300,itemValueMinor:1000000,conditionChecklist:['Works correctly'],area:'Bengaluru',description:'Cordless drill for a short project',photoUploadId:cancellationPhoto});
+  const cancellationRequest=await borrower('/requests/'+cancellationListing.id,200,'PUT',dates);
+  const cancellationPath='/requests/'+cancellationRequest.id;
+  await owner(cancellationPath,200,'PATCH',{status:'accepted'});
+  const cancellationOrder=await borrower(cancellationPath+'/checkout',200,'POST',{});
+  await borrower(cancellationPath+'/checkout/verify',200,'POST',{razorpay_order_id:cancellationOrder.orderId,razorpay_payment_id:'pay_test_'+cancellationRequest.id,razorpay_signature:'test-signature:'+cancellationOrder.orderId+':pay_test_'+cancellationRequest.id});
+  await borrower(cancellationPath,200,'PATCH',{status:'cancelled'});
+  assert.equal((await borrower('/activity')).threads.find(row=>row.id===cancellationRequest.id).status,'cancelled');
+  assert.ok((await owner('/__test/ledger/'+cancellationRequest.id)).some(row=>row.event_type==='transfer_reversal'));
+  await owner('/listings/'+cancellationListing.id,200,'DELETE');
   const competing = await outsider('/requests/' + listing.id,200,'PUT',dates);
   await owner('/requests/' + competing.id,409,'PATCH',{status:'accepted'});
   assert.equal((await borrower('/activity')).threads[0].end_date,dates.endDate);
@@ -157,13 +214,11 @@ test('marketplace permissions, requests, messages, and moderation', async t => {
   await outsider(jobPath,200,'PATCH',{status:'completed'});
   await outsider(jobPath + '/rating',200,'POST',{score:4,comment:'Clear explanations'});
   await owner('/listings/' + service.id,200,'DELETE');
-  await borrower(path + '/rating',403,'POST',{score:5});
-  await owner(path,200,'PATCH',{status:'active'});
+  await borrower(path + '/rating',409,'POST',{score:5});
+  await owner(path,409,'PATCH',{status:'active'});
   await owner('/listings/' + listing.id,409,'DELETE');
-  assert.equal((await borrower('/activity')).threads[0].agreed_price,'200');
-  await borrower(path,200,'PATCH',{status:'returned'});
-  await owner(path,200,'PATCH',{status:'completed'});
-  await borrower(path + '/rating',200,'POST',{score:5});
+  assert.equal((await borrower('/activity')).threads.find(row=>row.id===request.id).agreed_price,'200');
+  await borrower(path,409,'PATCH',{status:'returned'});
   await borrower(path + '/rating',409,'POST',{score:5});
   await borrower('/reports/' + listing.id,200,'POST',{reason:'Test report'});
   const [report] = (await admin('/activity')).reports;
@@ -183,12 +238,12 @@ test('marketplace permissions, requests, messages, and moderation', async t => {
   await borrower('/password-reset/complete',400,'POST',{token:resetToken,password:'sample-new-passphrase'});
   await borrower('/login',200,'POST',{...account('borrower'),password:'sample-new-passphrase'});
   assert.equal((await fetch(origin + '/', {headers:{cookie:borrower.cookie()},redirect:'manual'})).status,200);
-  assert.equal((await borrower('/activity')).threads[0].status,'completed');
+  assert.equal((await borrower('/activity')).threads.find(row=>row.id===request.id).status,'completed');
   assert.equal((await fetch(origin + '/login')).status,200);
   const page = await fetch(origin);
   assert.match(await page.text(),/view-landing/);
   assert.equal((await fetch(origin + '/app.js')).status,200);
-  assert.equal((await owner(path + '/audit')).length,4);
+  assert.equal((await owner(path + '/audit')).length,7);
 });
 
 test('versioned foundation migrations seed placeholder settings and protect append-only tables', async () => {
@@ -200,7 +255,7 @@ test('versioned foundation migrations seed placeholder settings and protect appe
     const { openDatabase } = await import('./database.mjs');
     const query = await openDatabase();
     const versions = await query('SELECT version,name FROM schema_migrations ORDER BY version');
-    assert.deepEqual(versions.rows.map(row => row.version),[1,2,3,4]);
+  assert.deepEqual(versions.rows.map(row => row.version),[1,2,3,4,5]);
     const settings = await query('SELECT setting_key,setting_value FROM marketplace_settings ORDER BY setting_key');
     assert.equal(settings.rows.find(row => row.setting_key === 'claim_window_hours').setting_value,'24');
     await query('INSERT INTO money_ledger(booking,event_type,amount_minor,currency,idempotency_key,metadata,occurred_at) VALUES(1,\'hold\',100,\'INR\',\'test-hold\',\'{}\',?)',new Date().toISOString());
