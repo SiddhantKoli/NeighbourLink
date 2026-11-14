@@ -18,7 +18,8 @@ Set `PORT` and `HOST` to change the listener, and `DB_PATH` to select a differen
 | --- | --- |
 | `DATABASE_URL` | Optional PostgreSQL/Supabase connection string. Leave empty for SQLite. |
 | `PUBLIC_ORIGIN` | Exact public site origin used to build verification and recovery links. |
-| `EMAIL_PROVIDER` | `resend` for delivery, or `mock` in tests only. |
+| `EMAIL_PROVIDER` | `resend` for delivery, or `mock` in tests/local development only. |
+| `ALLOW_DEV_EMAIL_OTP`, `EMAIL_OTP_DEV_CODE` | With `NODE_ENV=development` and `EMAIL_PROVIDER=mock`, show the fixed local email code after signup or resend. |
 | `RESEND_API_KEY`, `EMAIL_FROM` | Resend server-side credentials and verified sender. Never put these in browser code or commit `.env`. |
 | `OBJECT_STORAGE_MODE` | `local` for development, `s3` for production, or `memory` in tests only. |
 | `OBJECT_STORAGE_DIR` | Local private image directory. |
@@ -38,7 +39,7 @@ Set `PORT` and `HOST` to change the listener, and `DB_PATH` to select a differen
 | `DB_PATH` | SQLite database file. |
 | `PORT`, `HOST` | HTTP listener settings. |
 
-Email verification and password recovery require a configured Resend sender outside tests. Phone verification requires configured Twilio credentials; only local development with `NODE_ENV=development`, `SMS_PROVIDER=mock`, and `ALLOW_DEV_OTP=1` may display a test code. New photos are checked for JPEG, PNG, or WebP content and limited to 1 MB. Production should use a private S3-compatible bucket and configure server credentials. Do not expose the bucket publicly; image reads pass through the authenticated application.
+Email verification sends a six-digit code that expires in 10 minutes; password recovery sends a single-use link. Both require a configured Resend sender outside tests. For local development only, a fixed email code is available when `NODE_ENV=development`, `EMAIL_PROVIDER=mock`, and `ALLOW_DEV_EMAIL_OTP=1`; set `EMAIL_OTP_DEV_CODE` (default `123456`). Never enable this option in production. Phone verification requires configured Twilio credentials; only local development with `NODE_ENV=development`, `SMS_PROVIDER=mock`, and `ALLOW_DEV_OTP=1` may display a test code. New photos are checked for JPEG, PNG, or WebP content and limited to 1 MB. Production should use a private S3-compatible bucket and configure server credentials. Do not expose the bucket publicly; image reads pass through the authenticated application.
 
 The seller dashboard summarizes listing activity, ledger-recorded releases, held amounts, and estimated release dates. Estimates are not a bank payout promise. Owners can block gear listing dates; search supports category, price, date availability, owner rating, and distance when the member chooses to share their location. Transactional email is queued with retry and deduplication; configure the same Resend settings described above. Terms, privacy, cancellation/refund, and banned-item pages are published as drafts for lawyer review, not final legal advice.
 

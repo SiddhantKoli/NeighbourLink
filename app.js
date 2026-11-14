@@ -293,11 +293,12 @@ async function acceptShopInviteFromLink() {
   url.searchParams.delete('shopInvite');history.replaceState(null,'',url.pathname+url.search+url.hash);
 }
 submit(auth, async form => {
-  await api('/' + auth.dataset.mode, 'POST', Object.fromEntries(form));
+  const authResult=await api('/' + auth.dataset.mode, 'POST', Object.fromEntries(form));
   user = await api('/session');
   if (!user.emailVerified) {
     auth.querySelector('form').reset();
     await navigate('verify');
+    if(authResult.devEmailCode) $('#verify-status').textContent='Local development code: ' + authResult.devEmailCode;
     return;
   }
   if (!user.profileComplete) {
@@ -403,7 +404,7 @@ verifyForm.addEventListener('submit',event => {
   $('#verify-error').textContent='';
   perform(async () => {
     try {
-      await api('/verify-email','POST',{token:verifyForm.elements.token.value});
+      await api('/verify-email','POST',{token:verifyForm.elements.token.value,code:verifyForm.elements.code.value});
       user=await api('/session');
       if (!user) { await navigate('login'); toast('Email confirmed. Sign in to continue.'); return; }
       if (!user.profileComplete) await navigate('profile');
@@ -412,8 +413,9 @@ verifyForm.addEventListener('submit',event => {
   });
 });
 $('#verify-resend').onclick=() => perform(async () => {
-  await api('/email-verification/resend','POST',{});
-  $('#verify-status').textContent='If the address still needs confirmation, a new link is on its way.';
+  const result=await api('/email-verification/resend','POST',{});
+  verifyForm.elements.code.value='';
+  $('#verify-status').textContent=result.devEmailCode ? 'Local development code: ' + result.devEmailCode : 'If the address still needs confirmation, a new six-digit code is on its way.';
 });
 $('#reset-request-form').addEventListener('submit',event => {
   event.preventDefault();
@@ -815,8 +817,10 @@ function navigate(next, updateHash = true) {
     try { document.body.dataset.theme = localStorage.getItem('nl-theme') || 'light'; } catch { document.body.dataset.theme = 'light'; }
   }
   if (next === 'verify') {
-    verifyForm.elements.token.value=currentToken || '';
-    $('#verify-copy').textContent=user?.email ? 'Open the confirmation link we sent to ' + user.email + '. Email must be confirmed before you can continue.' : 'Open the confirmation link in your email, then sign in to continue.';
+    verifyForm.elements.token.value=currentToken && !/^\d{6}$/.test(currentToken) ? currentToken : '';
+    verifyForm.elements.code.value=currentToken && /^\d{6}$/.test(currentToken) ? currentToken : '';
+    verifyForm.elements.code.required=!verifyForm.elements.token.value;
+    $('#verify-copy').textContent=user?.email ? 'Enter the six-digit code we sent to ' + user.email + '. It expires in 10 minutes.' : 'Enter the six-digit code from your email. It expires in 10 minutes.';
     $('#verify-resend').hidden=!user;
     try { document.body.dataset.theme=localStorage.getItem('nl-theme') || 'light'; } catch { document.body.dataset.theme='light'; }
   }

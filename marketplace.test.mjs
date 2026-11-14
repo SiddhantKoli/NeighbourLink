@@ -53,11 +53,11 @@ test('marketplace permissions, requests, messages, and moderation', async t => {
     await request('/email-verification/resend',200,'POST');
     const messages=await request('/__test/mailbox?to=' + encodeURIComponent(email));
     assert.equal(messages.length,1);
-    const url=messages[0].text.match(/https?:\/\/\S+/)?.[0];
-    assert.ok(url,'verification email should contain a link');
-    const token=new URL(url).searchParams.get('token');
-    await request('/verify-email',400,'POST',{token:'invalid-token'});
-    await request('/verify-email',200,'POST',{token});
+    const code=messages[0].text.match(/code is (\d{6})/)?.[1];
+    assert.ok(code,'verification email should contain a six-digit code');
+    await request('/verify-email',400,'POST',{code:code==='000000'?'000001':'000000'});
+    await request('/verify-email',200,'POST',{code});
+    await request('/verify-email',400,'POST',{code});
   };
   const completeProfile = async (request,name) => {
     const photoUploadId=await request.upload('profile');

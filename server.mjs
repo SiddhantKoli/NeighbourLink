@@ -136,20 +136,23 @@ function emailOrigin(req) {
   return url.origin;
 }
 async function issueEmailToken(req,user,kind) {
-  const token = randomBytes(32).toString('base64url');
+  const isEmailCode = kind === 'verify';
+  const developmentCodeEnabled = process.env.NODE_ENV === 'development' && process.env.EMAIL_PROVIDER === 'mock' && process.env.ALLOW_DEV_EMAIL_OTP === '1';
+  const token = isEmailCode ? (developmentCodeEnabled && /^\d{6}$/.test(process.env.EMAIL_OTP_DEV_CODE || '') ? process.env.EMAIL_OTP_DEV_CODE : String(randomInt(0,1000000)).padStart(6,'0')) : randomBytes(32).toString('base64url');
   const now = new Date();
-  const expires = new Date(now.getTime() + (kind === 'verify' ? 24 : 1) * 60 * 60 * 1000).toISOString();
+  const expires = new Date(now.getTime() + (isEmailCode ? 10 : 60) * 60 * 1000).toISOString();
   const table = kind === 'verify' ? 'email_verification_tokens' : 'password_reset_tokens';
   await run('UPDATE ' + table + ' SET used_at=? WHERE user_id=? AND used_at IS NULL',now.toISOString(),user.id);
   await run('INSERT INTO ' + table + '(token_hash,user_id,expires_at,created_at) VALUES(?,?,?,?)',digest(token),user.id,expires,now.toISOString());
-  const route = kind === 'verify' ? '/verify-email' : '/reset-password';
+  const route = isEmailCode ? '/verify-email' : '/reset-password';
   const url = emailOrigin(req) + route + '?token=' + encodeURIComponent(token);
-  const subject = kind === 'verify' ? 'Confirm your NeighbourLink email' : 'Reset your NeighbourLink password';
-  const action = kind === 'verify' ? 'Confirm email' : 'Choose a new password';
-  const text = kind === 'verify' ? 'Confirm your email address: ' + url + '\nThis link expires in 24 hours.' : 'Reset your password: ' + url + '\nThis link expires in 1 hour.';
-  const html = '<p>' + action + ' for your NeighbourLink account.</p><p><a href="' + url + '">' + action + '</a></p><p>This link expires in ' + (kind === 'verify' ? '24 hours.' : '1 hour.') + '</p>';
+  const subject = isEmailCode ? 'Your NeighbourLink confirmation code' : 'Reset your NeighbourLink password';
+  const action = isEmailCode ? 'Confirm email' : 'Choose a new password';
+  const text = isEmailCode ? 'Your NeighbourLink confirmation code is ' + token + '.\nEnter it on the confirmation screen. It expires in 10 minutes.' : 'Reset your password: ' + url + '\nThis link expires in 1 hour.';
+  const html = isEmailCode ? '<p>Enter this code to confirm your NeighbourLink email:</p><p style="font-size:32px;font-weight:bold;letter-spacing:8px">' + token + '</p><p>This code expires in 10 minutes.</p>' : '<p>' + action + ' for your NeighbourLink account.</p><p><a href="' + url + '">' + action + '</a></p><p>This link expires in 1 hour.</p>';
   try { await sendEmail({to:user.email,subject,text,html}); }
   catch (error) { fail(503,error.message || 'Email delivery is unavailable.'); }
+  return developmentCodeEnabled && isEmailCode ? token : undefined;
 }
 async function readImageRequest(req) {
   const contentType = req.headers['content-type']?.toLowerCase();
@@ -363,14 +366,18 @@ async function api(req, res, path) {
   }
   if (process.env.NODE_ENV==='test'&&method==='GET'&&/^\/__test\/ledger\/\d+$/.test(path)) return await all('SELECT event_type,amount_minor,provider_reference,idempotency_key FROM money_ledger WHERE booking=? ORDER BY id',Number(path.split('/')[3]));
   if (method === 'POST' && path === '/verify-email') {
-    const token = field(await json(req),'token',64);
-    if (!/^[A-Za-z0-9_-]{43}$/.test(token)) fail(400,'That confirmation link is invalid or expired.');
+    throttle('email-verify:' + req.socket.remoteAddress,30);
+    const body=await json(req);
+    const token = typeof body.token === 'string' && body.token ? body.token : String(body.code || '').trim();
+    const validCode=/^\d{6}$/.test(token);
+    const validLegacyLink=/^[A-Za-z0-9_-]{43}$/.test(token);
+    if (!validCode && !validLegacyLink) fail(400,'Enter the six-digit code from your email.');
     const tokenHash=digest(token),now=new Date().toISOString();
     const record=await get('SELECT user_id FROM email_verification_tokens WHERE token_hash=? AND used_at IS NULL AND expires_at>?',tokenHash,now);
-    if (!record) fail(400,'That confirmation link is invalid or expired.');
+    if (!record) fail(400,'That code is invalid or expired. Request a new one and try again.');
     await query.transaction(async tx => {
       const used=await tx('UPDATE email_verification_tokens SET used_at=? WHERE token_hash=? AND used_at IS NULL AND expires_at>?',now,tokenHash,now);
-      if (!used.changes) fail(400,'That confirmation link is invalid or expired.');
+      if (!used.changes) fail(400,'That code is invalid or expired. Request a new one and try again.');
       await tx('UPDATE users SET email_verified_at=? WHERE id=?',now,record.user_id);
     });
     return {ok:true};
@@ -425,16 +432,17 @@ async function api(req, res, path) {
       const hashed = scryptSync(password, account?.salt || 'missing-account', 64);
       if (!account || !timingSafeEqual(hashed, Buffer.from(account.password, 'hex'))) fail(401, 'Email or password is incorrect.');
     }
-    if (path === '/signup') await issueEmailToken(req,{id:account.id,email},'verify');
+    const devEmailCode = path === '/signup' ? await issueEmailToken(req,{id:account.id,email},'verify') : undefined;
     if (token) await run('DELETE FROM sessions WHERE token=?', digest(token));
     await session(res, account.id);
-    return { ok: true };
+    return { ok: true, ...(devEmailCode ? {devEmailCode} : {}) };
   }
   if (!user) fail(401, 'Sign in to continue.');
   if (method === 'POST' && path === '/email-verification/resend') {
     if (!user.emailVerified) {
       throttle(req.socket.remoteAddress);
-      await issueEmailToken(req,user,'verify');
+      const devEmailCode=await issueEmailToken(req,user,'verify');
+      return {ok:true,...(devEmailCode ? {devEmailCode} : {})};
     }
     return {ok:true};
   }
