@@ -140,6 +140,16 @@ body.nl-login[data-theme="dark"] .login-form-side{background:radial-gradient(cir
 .profile-setup-card .auth-field small{font-size:14px;font-weight:400;color:var(--auth-muted);line-height:1.4}
 .profile-setup-card input[type=file]{height:auto;padding:12px;background:var(--auth-soft)}
 #profile-preview{width:104px;height:104px;border-radius:50%;object-fit:cover;border:3px solid var(--auth-ink)}
+.phone-otp-form{display:grid;gap:14px;margin:18px 0;padding:18px;border:2px solid var(--auth-ink);box-shadow:5px 5px 0 var(--auth-ink);background:var(--auth-soft)}
+.phone-otp-form h2,.phone-otp-form p{margin:0}
+.phone-otp-form input{width:100%;height:52px;padding:0 14px;border:2px solid var(--auth-ink);font-size:18px;letter-spacing:.2em}
+.trust-center,.kyc-review{margin-top:24px;padding:18px;border:2px solid var(--auth-ink);box-shadow:4px 4px 0 var(--auth-ink)}
+.trust-center p,.kyc-review p{font-size:14px;line-height:1.5}
+.trust-center small{font-size:14px}
+.trust-center form{display:grid;gap:14px;margin-top:16px}
+.trust-center a{font-weight:700;text-decoration:underline}
+.kyc-review{margin-top:14px}
+.item-value{display:block;margin-top:6px;font-size:14px;font-weight:600}
 .profile-privacy,.profile-id-note{font-size:14px;line-height:1.45;padding:12px;border-left:3px solid #00e4ae;background:var(--auth-soft);margin:0}
 .profile-id-note{border-left-color:#ffbe35}
 .profile-setup .nl-error:empty{display:none}

@@ -15,8 +15,6 @@ const schema = `
 `;
 const requestColumns = ['start_date','end_date','details','pickup_at','return_at','completed_at','accepted_at','agreed_price','is_gear'];
 const listingColumns = ['latitude','longitude'];
-const tableNames = ['users','sessions','listings','saved','requests','messages','reports','ratings','demo_payments','email_verification_tokens','password_reset_tokens','booking_status_audit','money_ledger','marketplace_settings','uploads','schema_migrations'];
-
 const migrations = [
   {
     version: 1,
@@ -121,6 +119,65 @@ const migrations = [
         CREATE INDEX IF NOT EXISTS listings_photo_key ON listings(photo_key);
       `);
     }
+  },
+  {
+    version: 4,
+    name: 'phone verification, KYC, and rental trust foundation',
+    async up(context) {
+      await context.addColumn('users','phone_verified_at','TEXT');
+      await context.addColumn('users','kyc_status',"TEXT NOT NULL DEFAULT 'unverified'");
+      await context.addColumn('listings','item_value_minor','BIGINT');
+      await context.exec(`
+        CREATE TABLE IF NOT EXISTS phone_otp_challenges(
+          id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, phone TEXT NOT NULL, code_hash TEXT NOT NULL,
+          expires_at TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, used_at TEXT, created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS phone_otp_user_created ON phone_otp_challenges(user_id,created_at);
+        CREATE TABLE IF NOT EXISTS kyc_cases(
+          user_id INTEGER PRIMARY KEY, status TEXT NOT NULL DEFAULT 'unverified' CHECK(status IN ('unverified','verified','suspended')),
+          id_storage_key TEXT, id_content_type TEXT, selfie_storage_key TEXT, selfie_content_type TEXT,
+          provider TEXT NOT NULL DEFAULT 'manual', provider_reference TEXT, decision_reason TEXT,
+          submitted_at TEXT, reviewed_at TEXT, reviewer_user_id INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS kyc_access_audit(
+          id INTEGER PRIMARY KEY, reviewer_user_id INTEGER NOT NULL, subject_user_id INTEGER NOT NULL,
+          document_kind TEXT NOT NULL, accessed_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS kyc_access_subject_time ON kyc_access_audit(subject_user_id,accessed_at);
+        CREATE TABLE IF NOT EXISTS kyc_review_audit(
+          id INTEGER PRIMARY KEY, actor_user_id INTEGER NOT NULL, subject_user_id INTEGER NOT NULL,
+          old_status TEXT NOT NULL, new_status TEXT NOT NULL, reason TEXT NOT NULL, occurred_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS kyc_review_subject_time ON kyc_review_audit(subject_user_id,occurred_at);
+      `);
+      const now=new Date().toISOString();
+      const defaults=[
+        ['new_renter_max_item_value_minor','2000000','Placeholder: maximum item value for a new renter, in paise.'],
+        ['established_renter_completed_rentals','3','Placeholder: completed rentals required to leave the new-renter tier.'],
+        ['trust_score_minimum','65','Placeholder: minimum trust score before elevated item-value access.'],
+        ['trust_score_maximum','100','Placeholder: upper bound for the explainable trust score.'],
+        ['kyc_document_retention_days','90','Placeholder: days to retain identity documents after a review decision.']
+      ];
+      for (const [key,value,description] of defaults) {
+        await context.query('INSERT INTO marketplace_settings(setting_key,setting_value,description,updated_at) VALUES(?,?,?,?) ON CONFLICT(setting_key) DO NOTHING',key,value,description,now);
+      }
+      const appendOnly=['kyc_access_audit','kyc_review_audit'];
+      if (context.dialect === 'sqlite') {
+        for (const table of appendOnly) {
+          await context.exec(`CREATE TRIGGER IF NOT EXISTS ${table}_no_update BEFORE UPDATE ON ${table} BEGIN SELECT RAISE(ABORT,'${table} is append-only'); END;`);
+          await context.exec(`CREATE TRIGGER IF NOT EXISTS ${table}_no_delete BEFORE DELETE ON ${table} BEGIN SELECT RAISE(ABORT,'${table} is append-only'); END;`);
+        }
+      } else {
+        await context.exec(`
+          CREATE OR REPLACE FUNCTION prevent_kyc_audit_mutation() RETURNS trigger LANGUAGE plpgsql AS $$
+          BEGIN RAISE EXCEPTION '% is append-only', TG_TABLE_NAME; END; $$;
+          DROP TRIGGER IF EXISTS kyc_access_audit_append_only ON kyc_access_audit;
+          CREATE TRIGGER kyc_access_audit_append_only BEFORE UPDATE OR DELETE ON kyc_access_audit FOR EACH ROW EXECUTE FUNCTION prevent_kyc_audit_mutation();
+          DROP TRIGGER IF EXISTS kyc_review_audit_append_only ON kyc_review_audit;
+          CREATE TRIGGER kyc_review_audit_append_only BEFORE UPDATE OR DELETE ON kyc_review_audit FOR EACH ROW EXECUTE FUNCTION prevent_kyc_audit_mutation();
+        `);
+      }
+    }
   }
 ];
 
@@ -141,7 +198,7 @@ function sqliteExecutor(db) {
 function postgresExecutor(client,pool) {
   const execute = async (sql,...args) => {
     let index = 0;
-    const qualified = sql.replace(/\b(FROM|JOIN|INTO|UPDATE|TABLE) (users|sessions|listings|saved|requests|messages|reports|ratings|demo_payments|email_verification_tokens|password_reset_tokens|booking_status_audit|money_ledger|marketplace_settings|uploads|schema_migrations)\b/g,'$1 neighbourlink.$2');
+    const qualified = sql.replace(/\b(FROM|JOIN|INTO|UPDATE|TABLE) (users|sessions|listings|saved|requests|messages|reports|ratings|demo_payments|email_verification_tokens|password_reset_tokens|booking_status_audit|money_ledger|marketplace_settings|uploads|schema_migrations|phone_otp_challenges|kyc_cases|kyc_access_audit|kyc_review_audit)\b/g,'$1 neighbourlink.$2');
     const result = await client.query(qualified.replaceAll('?',() => '$' + ++index),args);
     return { rows:result.rows, changes:result.rowCount };
   };

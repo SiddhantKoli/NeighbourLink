@@ -26,10 +26,17 @@ Set `PORT` and `HOST` to change the listener, and `DB_PATH` to select a differen
 | `OBJECT_STORAGE_ENDPOINT`, `OBJECT_STORAGE_PATH_STYLE` | Optional S3-compatible endpoint settings. |
 | `OBJECT_STORAGE_ACCESS_KEY_ID`, `OBJECT_STORAGE_SECRET_ACCESS_KEY` | Optional explicit S3 credentials; otherwise the AWS SDK credential chain is used. |
 | `OBJECT_STORAGE_SSE` | Optional server-side encryption setting supported by the bucket. |
+| `SMS_PROVIDER` | `twilio` for phone OTP delivery; the mock provider is limited to tests or explicit local development. |
+| `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM` | Server-side Twilio credentials and sender for phone verification. |
+| `ALLOW_DEV_OTP` | Set to `1` only with `NODE_ENV=development` and `SMS_PROVIDER=mock` to display a local-only OTP. Never enable in production. |
+| `KYC_ENCRYPTION_KEY` | Random 32-byte key encoded as 64 hex characters or base64. Required for government ID/selfie submissions; keep it separate from database and object-store backups. |
+| `KYC_PROVIDER` | `manual` for the built-in admin-review adapter. External identity providers are not wired yet. |
 | `DB_PATH` | SQLite database file. |
 | `PORT`, `HOST` | HTTP listener settings. |
 
-Email verification and password recovery require a configured Resend sender outside tests. New photos are checked for JPEG, PNG, or WebP content and limited to 1 MB. Production should use a private S3-compatible bucket and configure server credentials. Do not expose the bucket publicly; image reads pass through the authenticated application.
+Email verification and password recovery require a configured Resend sender outside tests. Phone verification requires configured Twilio credentials; only local development with `NODE_ENV=development`, `SMS_PROVIDER=mock`, and `ALLOW_DEV_OTP=1` may display a test code. New photos are checked for JPEG, PNG, or WebP content and limited to 1 MB. Production should use a private S3-compatible bucket and configure server credentials. Do not expose the bucket publicly; image reads pass through the authenticated application.
+
+On Windows, generate the KYC encryption key in PowerShell with `$bytes = New-Object byte[] 32; $rng = [Security.Cryptography.RandomNumberGenerator]::Create(); $rng.GetBytes($bytes); [BitConverter]::ToString($bytes).Replace('-', '')`, then put the result in `.env`. Back up this key separately and restrict access; losing it makes previously stored identity images unreadable.
 
 ## Supabase PostgreSQL
 
@@ -67,6 +74,8 @@ The browser and a future desktop app can use the same versioned API. For an Elec
 - Listings can be saved, reported, and requested with rental dates or a preferred service date.
 - Owners approve requests; participants have a private conversation and can leave a rating after completion.
 - Account creation requires email verification and a complete profile with a validated phone number and profile photo.
+- Phone numbers are verified using single-use, rate-limited SMS codes. Gear listings include item value; new renters are limited to lower-value items until they build rental history and ratings.
+- Optional government ID and selfie review uses encrypted image storage, restricted admin access, reviewer decision states, and an access audit. Reviewed documents are removed after the settings-driven retention period (currently a 90-day placeholder); pending reviews remain available until decided. NeighbourLink does not ask for Aadhaar numbers.
 - Password recovery uses single-use, expiring email links.
 - Admin reports and booking history are available to authorized accounts.
 - Example photos are illustrative only; member listings use the photo uploaded by the owner.

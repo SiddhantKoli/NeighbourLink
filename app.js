@@ -267,6 +267,12 @@ submit(auth, async form => {
 });
 const profileForm = $('#profile-form');
 profileForm.elements.name.value = '';
+const phoneOtpForm=document.createElement('form');
+phoneOtpForm.id='phone-otp-form';
+phoneOtpForm.className='phone-otp-form';
+phoneOtpForm.hidden=true;
+phoneOtpForm.innerHTML='<h2>Verify your phone.</h2><p id="phone-otp-help">Enter the one-time code sent to your phone. The code expires in 10 minutes.</p><label class="auth-field">Six-digit code<input name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" required></label><p class="nl-error" id="phone-otp-error" role="alert"></p><button class="btn primary auth-submit" type="submit">Verify phone</button><button class="btn" id="phone-otp-resend" type="button">Send a new code</button></form>';
+profileForm.after(phoneOtpForm);
 profileForm.addEventListener('submit',event => {
   event.preventDefault();
   const button = profileForm.querySelector('.auth-submit');
@@ -275,16 +281,51 @@ profileForm.addEventListener('submit',event => {
   perform(async () => {
     try {
       const file = profileForm.elements.photoFile.files[0];
-      if (!file || file.size > 1000000 || !['image/jpeg','image/png','image/webp'].includes(file.type)) throw Error('Choose a JPEG, PNG, or WebP face photo under 1 MB.');
-      const photoUploadId=await uploadImage(file,'profile');
+      let photoUploadId;
+      if (file) {
+        if (file.size > 1000000 || !['image/jpeg','image/png','image/webp'].includes(file.type)) throw Error('Choose a JPEG, PNG, or WebP face photo under 1 MB.');
+        photoUploadId=await uploadImage(file,'profile');
+      } else if (!user?.hasProfilePhoto) throw Error('Choose a JPEG, PNG, or WebP face photo under 1 MB.');
       await api('/profile','PUT',{name:profileForm.elements.name.value,email:profileForm.elements.email.value,phone:profileForm.elements.phone.value,photoUploadId});
       user = await api('/session');
+      if (!user.phoneVerified) {
+        const sent=await api('/phone-otp/send','POST',{});
+        profileForm.hidden=true;
+        phoneOtpForm.hidden=false;
+        $('#phone-otp-help').textContent='Enter the one-time code sent to ' + user.phone + '. It expires in 10 minutes.' + (sent.devCode ? ' Local development code: ' + sent.devCode : '');
+        phoneOtpForm.elements.code.focus();
+        return;
+      }
       activateProtectedFrames();
       await refresh();
       await navigate('landing');
     } catch(error) { $('#profile-error').textContent = error.message; }
     finally { button.disabled = false; }
   });
+});
+phoneOtpForm.addEventListener('submit',event=>{
+  event.preventDefault();
+  const button=phoneOtpForm.querySelector('.auth-submit');
+  button.disabled=true;
+  $('#phone-otp-error').textContent='';
+  perform(async()=>{
+    try {
+      await api('/phone-otp/verify','POST',{code:phoneOtpForm.elements.code.value});
+      user=await api('/session');
+      if (!user.profileComplete) throw Error('Your profile is still incomplete.');
+      activateProtectedFrames();
+      await refresh();
+      await navigate('landing');
+    } catch(error) { $('#phone-otp-error').textContent=error.message; }
+    finally { button.disabled=false; }
+  });
+});
+$('#phone-otp-resend').onclick=()=>perform(async()=>{
+  $('#phone-otp-error').textContent='';
+  try {
+    const sent=await api('/phone-otp/send','POST',{});
+    $('#phone-otp-help').textContent='A new code was sent to ' + user.phone + '. It expires in 10 minutes.' + (sent.devCode ? ' Local development code: ' + sent.devCode : '');
+  } catch(error) { $('#phone-otp-error').textContent=error.message; }
 });
 profileForm.elements.photoFile.addEventListener('change',() => {
   const file = profileForm.elements.photoFile.files[0];
@@ -353,7 +394,15 @@ accountButton.onclick = () => perform(() => user ? navigate('dashboard') : requi
 function changeCategories() {
   const form = listing.querySelector('form');
   form.elements.category.replaceChildren(...categories[form.elements.kind.value].map(value => new Option(value)));
+  const valueField=$('#item-value-field');
+  valueField.hidden=form.elements.kind.value!=='gear';
+  valueField.querySelector('input').required=form.elements.kind.value==='gear';
 }
+const itemValueField=document.createElement('div');
+itemValueField.id='item-value-field';
+itemValueField.className='field';
+itemValueField.innerHTML='<label for="item-value-input">Approximate item value (₹)</label><input id="item-value-input" name="itemValue" type="number" min="1" max="1000000000" step="1" placeholder="15000"><small>Used to limit risk for new renter accounts.</small>';
+listing.querySelector('[name="price"]').parentElement.after(itemValueField);
 $('#listing-location').onclick = () => perform(async () => {
   listingLocation = await locate();
   $('#listing-location-status').textContent = 'Approximate location added.';
@@ -392,6 +441,8 @@ submit(listing, async form => {
   const body = Object.fromEntries(form);
   const file = body.photo;
   body.price = Number(body.price);
+  if (body.kind==='gear') body.itemValueMinor=Math.round(Number(body.itemValue)*100);
+  delete body.itemValue;
   if (listingLocation) Object.assign(body,listingLocation);
   if (!file.size) throw Error('Choose a photo of the item or your work.');
   if (file.size > 1000000 || !['image/jpeg','image/png','image/webp'].includes(file.type)) throw Error('Choose a JPEG, PNG, or WebP photo under 1 MB.');
@@ -419,7 +470,7 @@ function card(item) {
     (item.hasPhoto ? '<img class="nl-photo" loading="lazy" src="/photos/' + item.id + '" alt="' + escape(item.title) + '">' : '<span class="nl-no-photo">No photo uploaded</span>') +
     '<span class="tag">' + escape(item.category) + '</span><button class="heart" aria-label="' + (saved ? 'Remove from saved' : 'Save listing') + '" aria-pressed="' + saved + '" data-save="' + item.id + '">' + (saved ? '♥' : '♡') + '</button></div>' +
     '<div class="card-body"><h3>' + escape(item.title) + '</h3><div class="meta">⌖ ' + escape(item.area) + '</div><p class="nl-description">' + escape(item.description) + '</p><div class="owner">' + escape(item.name) + '</div></div>' +
-    '<div class="card-foot"><div class="price"><strong>₹' + item.price.toLocaleString('en-IN') + '</strong> ' + (item.kind === 'gear' ? '/ DAY' : '/ JOB') + '</div>' +
+    '<div class="card-foot"><div class="price"><strong>₹' + item.price.toLocaleString('en-IN') + '</strong> ' + (item.kind === 'gear' ? '/ DAY' : '/ JOB') + (item.kind==='gear'&&item.item_value_minor!=null?'<small class="item-value">Item value ₹'+Math.floor(item.item_value_minor/100).toLocaleString('en-IN')+'</small>':'') + '</div>' +
     (item.owner === user?.id ? '' : '<button data-request="' + item.id + '">REQUEST →</button>') +
     '</div><button class="btn" data-report="' + item.id + '">Report</button></article>';
 }
@@ -515,6 +566,51 @@ function renderActivity() {
     (user.admin ? '<h2>Open reports</h2>' + (activity.reports.map(item => '<div class="nl-record"><strong>' + escape(item.title) + '</strong><p>' + escape(item.reason) + '</p><button class="btn" data-moderate="' + item.id + '" data-status="removed">Remove listing</button> <button class="btn" data-moderate="' + item.id + '" data-status="dismissed">Dismiss</button></div>').join('') || '<p>No open reports.</p>') : '') :
     '<button class="btn primary" data-signin>Sign in</button>';
   $('.threads').innerHTML = activity.threads.map(thread => '<button class="thread nl-thread' + (thread.id === threadId ? ' active' : '') + '" data-thread="' + thread.id + '"><b>' + escape(thread.title) + '</b><small>' + escape(thread.status) + ' · ' + escape(thread.owner === user?.id ? thread.requesterName : thread.ownerName) + '</small></button>').join('') || empty(user ? 'No requests yet.' : 'Sign in to see your requests.');
+  if (user) loadKycCenter();
+}
+async function loadKycCenter() {
+  const activityRoot=$('#activity');
+  if (!activityRoot || !user) return;
+  let center=$('#kyc-center');
+  if (!center) {
+    center=document.createElement('section');
+    center.id='kyc-center';
+    center.className='trust-center';
+    activityRoot.append(center);
+  }
+  try {
+    const status=await api('/kyc/status');
+    if (!user || !center.isConnected) return;
+    const label=status.status==='verified'?'Verified':status.status==='suspended'?'Suspended':status.submitted_at?'In review':'Not verified';
+    center.innerHTML='<h2>Identity verification</h2><p>Status: <strong>'+escape(label)+'</strong></p><p>Optional for now. ID and selfie images are encrypted before storage and are visible only to an authorized reviewer. We do not collect or store an Aadhaar number.</p>'+
+      (status.decision_reason?'<p>'+escape(status.decision_reason)+'</p>':'')+
+      (status.status==='verified'?'<p>Your identity check is complete.</p>':status.status==='suspended'?'<p>Contact NeighbourLink support if you think this is a mistake.</p>':'<form id="kyc-submit-form"><label class="auth-field">Government ID image<input name="idFile" type="file" accept="image/jpeg,image/png,image/webp" required><small>Upload a valid government ID image. Do not upload an Aadhaar number unless you choose a provider that specifically requires it.</small></label><label class="auth-field">Face selfie<input name="selfieFile" type="file" accept="image/jpeg,image/png,image/webp" required></label><p class="nl-error" role="alert"></p><button class="btn primary" type="submit">'+(status.submitted_at?'Resubmit for review':'Submit for review')+'</button></form>');
+    const form=$('#kyc-submit-form');
+    if (form) form.onsubmit=event=>{
+      event.preventDefault();
+      const button=form.querySelector('button');
+      const error=form.querySelector('.nl-error');
+      button.disabled=true;
+      error.textContent='';
+      perform(async()=>{
+        try {
+          const idFile=form.elements.idFile.files[0],selfieFile=form.elements.selfieFile.files[0];
+          for (const file of [idFile,selfieFile]) if (!file||file.size>1000000||!['image/jpeg','image/png','image/webp'].includes(file.type)) throw Error('Choose two JPEG, PNG, or WebP images under 1 MB each.');
+          const idUploadId=await uploadImage(idFile,'kyc-id');
+          const selfieUploadId=await uploadImage(selfieFile,'kyc-selfie');
+          await api('/kyc/submit','POST',{idUploadId,selfieUploadId});
+          await refresh();
+          toast('Identity documents sent for review.');
+        } catch(failure) { error.textContent=failure.message; }
+        finally { button.disabled=false; }
+      });
+    };
+    if (user.admin) {
+      const queue=await api('/admin/kyc');
+      if (!user || !center.isConnected) return;
+      center.innerHTML+='<h3>Identity review queue</h3>'+(queue.map(row=>'<article class="kyc-review"><strong>'+escape(row.name)+' · '+escape(row.email)+'</strong><p>'+escape(row.status)+' · submitted '+escape(row.submitted_at||'not submitted')+'</p>'+(row.submitted_at?'<p><a target="_blank" rel="noopener" href="/api/v1/admin/kyc/'+row.user_id+'/documents/id">Open ID image</a> · <a target="_blank" rel="noopener" href="/api/v1/admin/kyc/'+row.user_id+'/documents/selfie">Open selfie</a></p>':'')+'<label class="auth-field">Decision note<input data-kyc-reason="'+row.user_id+'" maxlength="500"></label><button class="btn" data-kyc-status="verified" data-user-id="'+row.user_id+'">Verify</button> <button class="btn" data-kyc-status="suspended" data-user-id="'+row.user_id+'">Suspend</button></article>').join('')||'<p>No identity submissions.</p>');
+    }
+  } catch(error) { center.textContent='Identity verification is temporarily unavailable.'; }
 }
 async function refresh() {
   [items,activity] = await Promise.all([
@@ -542,6 +638,15 @@ function navigate(next, updateHash = true) {
   if (next === 'profile') {
     profileForm.elements.name.value = user?.name || '';
     profileForm.elements.email.value = user?.email || '';
+    profileForm.elements.phone.value = user?.phone || '';
+    profileForm.elements.photoFile.required = !user?.hasProfilePhoto;
+    profileForm.hidden=false;
+    phoneOtpForm.hidden=true;
+    $('#view-profile .profile-setup-card > p').textContent='Add a clear face photo, your reachable phone number, and confirm it with a one-time SMS code.';
+    $('#view-profile .profile-privacy').textContent='Your face photo and phone number are private to your account and are not displayed on listings or shared with members in this pilot.';
+    const notes=document.querySelectorAll('#view-profile .profile-id-note');
+    notes[0].textContent='Optional identity review is available from My account. NeighbourLink stores encrypted ID and selfie images for manual review; no Aadhaar number is collected here.';
+    notes[1].textContent='Account recovery uses verified email links. Security questions are not used because answers can be guessed.';
     try { document.body.dataset.theme = localStorage.getItem('nl-theme') || 'light'; } catch { document.body.dataset.theme = 'light'; }
   }
   if (next === 'verify') {
@@ -556,7 +661,7 @@ function navigate(next, updateHash = true) {
     $('#reset-complete-form').elements.token.value=currentToken || '';
     try { document.body.dataset.theme=localStorage.getItem('nl-theme') || 'light'; } catch { document.body.dataset.theme='light'; }
   }
-  const portal = ['rentals','services','saved','messages','dashboard'].includes(next);
+  const portal = ['rentals','services','saved','messages'].includes(next);
   document.querySelectorAll('.view').forEach(section => section.classList.toggle('active',section.id === 'view-' + (portal ? 'rentals' : next)));
   document.querySelectorAll('[data-view]').forEach(button => button.classList.toggle('active',button.dataset.view === next));
   $('.shell').classList.toggle('landing',next === 'landing');
@@ -726,6 +831,12 @@ document.addEventListener('click', event => perform(async () => {
   if (data.moderate) {
     await api('/reports/' + data.moderate,'PATCH',{status:data.status});
     return refresh();
+  }
+  if (data.kycStatus && data.userId) {
+    const reason=$('[data-kyc-reason="'+data.userId+'"]').value;
+    await api('/admin/kyc/'+data.userId+'/status','PATCH',{status:data.kycStatus,reason});
+    await refresh();
+    return toast('Identity status updated.');
   }
   if (data.remove && confirm('Unpublish this listing?')) {
     await api('/listings/' + data.remove,'DELETE');

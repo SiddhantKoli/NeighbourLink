@@ -3,7 +3,8 @@
 ## Delivery status
 
 - **Phase 0 — Foundation: implemented locally.** Versioned migrations, account email verification/recovery, private object storage adapters and legacy-image migration utility, append-only audit/ledger protections, CI, and SQLite backup/restore instructions are in place. SQLite is covered by tests; a live Supabase migration has not yet been verified.
-- Phases 1–5 remain in the ordered plan below. Continue only after the prior phase has been tested and summarized.
+- **Phase 1 — Identity and trust: implemented locally.** SMS OTP delivery has a Twilio adapter and test mock; phone verification is required to finish signup. Manual KYC review stores app-encrypted ID/selfie images, exposes them only to the configured admin, and audits access and decisions. Trust scores use completed rentals and ratings received as an owner; new renters are capped by a settings-driven gear item-value tier. External KYC providers and mutual renter reviews remain future work.
+- Phases 2–5 remain in the ordered plan below. Continue only after the prior phase has been tested and summarized.
 - The supplied Phase 5 text is incomplete; it ends at “Subscription plans.”
 
 ## Starting architecture (before implementation)
@@ -28,9 +29,9 @@
 
 ### Phase 1 — Identity and trust
 
-1. No phone OTP/SMS adapter or verified-phone state.
-2. No provider-backed identity/selfie review, encrypted document storage, restricted review access, or explicit KYC status.
-3. No trust-score calculation or value-tier restrictions for new renters.
+1. Twilio OTP, rate-limited challenge records, and required phone verification are implemented; production SMS credentials and sender configuration still need to be supplied.
+2. Manual-review ID/selfie KYC is implemented with AES-GCM encryption, restricted admin access, explicit status, append-only access/decision audit, and settings-driven document retention. No automated third-party identity provider is configured.
+3. Explainable trust score and new-renter item-value limits are implemented with placeholder settings. Mutual ratings are still needed to rate renters directly.
 
 ### Phase 2 — Protected rental flow
 

@@ -9,7 +9,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 test('marketplace permissions, requests, messages, and moderation', async t => {
   const child = spawn(process.execPath, ['server.mjs'], {
-    env: {...process.env, DATABASE_URL:'', DB_PATH:':memory:', PORT:'0', HOST:'127.0.0.1', NODE_ENV:'test', EMAIL_PROVIDER:'mock', OBJECT_STORAGE_MODE:'memory', ADMIN_EMAIL:'admin@example.test', ADMIN_SIGNUP_CODE:'local-test-code'},
+    env: {...process.env, DATABASE_URL:'', DB_PATH:':memory:', PORT:'0', HOST:'127.0.0.1', NODE_ENV:'test', EMAIL_PROVIDER:'mock', SMS_PROVIDER:'mock', KYC_ENCRYPTION_KEY:'ab'.repeat(32), OBJECT_STORAGE_MODE:'memory', ADMIN_EMAIL:'admin@example.test', ADMIN_SIGNUP_CODE:'local-test-code'},
     stdio:['ignore','pipe','inherit']
   });
   t.after(() => child.kill());
@@ -61,7 +61,13 @@ test('marketplace permissions, requests, messages, and moderation', async t => {
   };
   const completeProfile = async (request,name) => {
     const photoUploadId=await request.upload('profile');
-    return request('/profile',200,'PUT',{name,phone:'+919876543210',photoUploadId});
+    await request('/profile',200,'PUT',{name,phone:'+919876543210',photoUploadId});
+    assert.equal((await request('/session')).phoneVerified,false);
+    assert.equal((await request('/session')).profileComplete,false);
+    await request('/phone-otp/send',200,'POST',{});
+    const [sms]=await request('/__test/sms?to=%2B919876543210');
+    await request('/phone-otp/verify',400,'POST',{code:sms.code==='000000'?'000001':'000000'});
+    return request('/phone-otp/verify',200,'POST',{code:sms.code});
   };
   await owner('/signup',200,'POST',account('owner'));
   assert.equal((await owner('/session')).emailVerified,false);
@@ -85,9 +91,23 @@ test('marketplace permissions, requests, messages, and moderation', async t => {
   await verifyEmail(admin,'admin@example.test');
   await completeProfile(admin,'admin');
   assert.equal((await admin('/session')).admin,true);
+  const idDocument=await owner.upload('kyc-id');
+  const selfie=await owner.upload('kyc-selfie');
+  await owner('/kyc/submit',200,'POST',{idUploadId:idDocument,selfieUploadId:selfie});
+  const queue=await admin('/admin/kyc');
+  assert.equal(queue.find(row=>row.user_id===1).status,'unverified');
+  const protectedDoc=await fetch(origin + '/api/v1/admin/kyc/1/documents/id',{headers:{cookie:admin.cookie()}});
+  assert.equal(protectedDoc.status,200);
+  assert.equal(protectedDoc.headers.get('content-type'),'image/jpeg');
+  assert.equal((await protectedDoc.arrayBuffer()).byteLength,4);
+  const deniedDoc=await fetch(origin + '/api/v1/admin/kyc/1/documents/selfie',{headers:{cookie:owner.cookie()}});
+  assert.equal(deniedDoc.status,403);
+  await admin('/admin/kyc/1/status',200,'PATCH',{status:'verified',reason:'Test review complete'});
+  assert.equal((await owner('/session')).kycStatus,'verified');
+  assert.deepEqual(await admin('/__test/kyc-audit'),{access:1,reviews:1});
   const listingPhoto=await owner.upload('listing');
   await owner.badUpload();
-  const listing = await owner('/listings',200,'POST',{title:'Drill',kind:'gear',category:'Tools',price:200,area:'Bengaluru',description:'Cordless drill',photoUploadId:listingPhoto});
+  const listing = await owner('/listings',200,'POST',{title:'Drill',kind:'gear',category:'Tools',price:200,itemValueMinor:1500000,area:'Bengaluru',description:'Cordless drill',photoUploadId:listingPhoto});
   const photoResponse=await fetch(origin + '/photos/' + listing.id);
   assert.equal(photoResponse.status,200);
   assert.equal(photoResponse.headers.get('content-type'),'image/jpeg');
@@ -97,6 +117,9 @@ test('marketplace permissions, requests, messages, and moderation', async t => {
   assert.deepEqual((await borrower('/activity')).saved,[listing.id]);
   assert.deepEqual((await owner('/activity')).saved,[]);
   const dates = { startDate:'2099-06-10', endDate:'2099-06-12', details:'Pickup at noon' };
+  const highValuePhoto=await owner.upload('listing');
+  const highValue=await owner('/listings',200,'POST',{title:'Workshop lathe',kind:'gear',category:'Tools',price:900,itemValueMinor:3000000,area:'Bengaluru',description:'Precision lathe',photoUploadId:highValuePhoto});
+  await borrower('/requests/' + highValue.id,403,'PUT',dates);
   const request = await borrower('/requests/' + listing.id,200,'PUT',dates);
   assert.deepEqual(await borrower('/requests/' + listing.id,200,'PUT',dates),request);
   const path = '/requests/' + request.id;
@@ -146,6 +169,7 @@ test('marketplace permissions, requests, messages, and moderation', async t => {
   const [report] = (await admin('/activity')).reports;
   await outsider('/reports/' + report.id,404,'PATCH',{status:'removed'});
   await admin('/reports/' + report.id,200,'PATCH',{status:'removed'});
+  await owner('/listings/' + highValue.id,200,'DELETE');
   assert.deepEqual(await borrower('/listings'),[]);
   await borrower('/logout',200,'POST');
   await borrower('/activity',401);
@@ -176,7 +200,7 @@ test('versioned foundation migrations seed placeholder settings and protect appe
     const { openDatabase } = await import('./database.mjs');
     const query = await openDatabase();
     const versions = await query('SELECT version,name FROM schema_migrations ORDER BY version');
-    assert.deepEqual(versions.rows.map(row => row.version),[1,2,3]);
+    assert.deepEqual(versions.rows.map(row => row.version),[1,2,3,4]);
     const settings = await query('SELECT setting_key,setting_value FROM marketplace_settings ORDER BY setting_key');
     assert.equal(settings.rows.find(row => row.setting_key === 'claim_window_hours').setting_value,'24');
     await query('INSERT INTO money_ledger(booking,event_type,amount_minor,currency,idempotency_key,metadata,occurred_at) VALUES(1,\'hold\',100,\'INR\',\'test-hold\',\'{}\',?)',new Date().toISOString());
@@ -184,6 +208,8 @@ test('versioned foundation migrations seed placeholder settings and protect appe
     await assert.rejects(() => query('DELETE FROM money_ledger WHERE id=1'),/append-only/);
     await query('INSERT INTO booking_status_audit(booking,old_status,new_status,occurred_at) VALUES(1,\'pending\',\'accepted\',?)',new Date().toISOString());
     await assert.rejects(() => query('UPDATE booking_status_audit SET new_status=\'declined\' WHERE id=1'),/append-only/);
+    await query("INSERT INTO kyc_access_audit(reviewer_user_id,subject_user_id,document_kind,accessed_at) VALUES(1,2,'id',?)",new Date().toISOString());
+    await assert.rejects(() => query('DELETE FROM kyc_access_audit WHERE id=1'),/append-only/);
   } finally {
     if (oldUrl === undefined) delete process.env.DATABASE_URL; else process.env.DATABASE_URL = oldUrl;
     if (oldPath === undefined) delete process.env.DB_PATH; else process.env.DB_PATH = oldPath;
