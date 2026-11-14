@@ -45,6 +45,15 @@ test('marketplace permissions, requests, messages, and moderation', async t => {
   await borrower(path + '/messages',200,'POST',{message:'Can I pick this up Saturday?'});
   assert.equal((await owner(path + '/messages'))[0].body,'Can I pick this up Saturday?');
   await owner(path,200,'PATCH',{status:'accepted'});
+  await outsider(path + '/checkout',404);
+  await owner(path + '/checkout',403,'POST',{outcome:'succeeded'});
+  await borrower(path + '/checkout',200,'POST',{outcome:'failed'});
+  assert.equal((await borrower(path + '/checkout')).status,'failed');
+  await borrower(path + '/checkout',200,'POST',{outcome:'succeeded'});
+  await borrower(path + '/checkout',200,'POST',{outcome:'failed'});
+  const receipt = await borrower(path + '/checkout');
+  assert.equal(receipt.status,'succeeded');
+  assert.equal(receipt.amount,60000);
   const competing = await outsider('/requests/' + listing.id,200,'PUT',dates);
   await owner('/requests/' + competing.id,409,'PATCH',{status:'accepted'});
   assert.equal((await borrower('/activity')).threads[0].end_date,dates.endDate);

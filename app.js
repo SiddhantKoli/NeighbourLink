@@ -25,6 +25,29 @@ let items = [];
 let activity = { saved:[], threads:[], listings:[], reports:[] };
 let threadId = null;
 let query = '';
+let visitorLocation = null;
+let listingLocation = null;
+let radius = 10;
+function kilometres(item) {
+  if (!visitorLocation || item.latitude == null || item.longitude == null) return null;
+  const radians = value => value * Math.PI / 180;
+  const dLat = radians(item.latitude - visitorLocation.latitude);
+  const dLon = radians(item.longitude - visitorLocation.longitude);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(radians(visitorLocation.latitude)) *
+    Math.cos(radians(item.latitude)) * Math.sin(dLon / 2) ** 2;
+  return 6371 * 2 * Math.asin(Math.sqrt(Math.min(1,a)));
+}
+function locate() {
+  return new Promise((resolve,reject) => {
+    if (!navigator.geolocation) return reject(Error('Location is unavailable. Search by neighbourhood instead.'));
+    navigator.geolocation.getCurrentPosition(position => resolve({
+      latitude: Math.round(position.coords.latitude * 100) / 100,
+      longitude: Math.round(position.coords.longitude * 100) / 100
+    }), error => reject(Error(error.code === 1 ? 'Location access declined. Search by neighbourhood instead.' :
+      'Could not find your location. Search by neighbourhood instead.')),
+    {enableHighAccuracy:false,timeout:15000,maximumAge:300000});
+  });
+}
 let afterSignIn;
 let signInReturn = 'home';
 let toastTimer;
@@ -80,6 +103,8 @@ const listing = dialog('listing-dialog','Put it to use.',
   '<label class="nl-field">Category<select name="category"></select></label>' +
   '<label class="nl-field">Price in rupees<input name="price" type="number" min="0" max="10000000" step="1" required></label>' +
   '<label class="nl-field">Neighbourhood<input name="area" required maxlength="100" placeholder="e.g. Indiranagar, Bengaluru"></label>' +
+  '<button type="button" class="btn" id="listing-location">Add approximate location</button>' +
+  '<span id="listing-location-status">Optional. Your approximate location will be public.</span>' +
   '<label class="nl-field">Description<textarea name="description" required maxlength="1200" rows="3"></textarea></label>' +
   '<label class="nl-field">Listing photo (JPEG, PNG, or WebP, up to 1 MB)<input name="photo" type="file" required accept="image/jpeg,image/png,image/webp"><small>Use a clear photo of the actual item or an example of your own work.</small><img class="nl-upload-preview" alt="Your listing photo preview" hidden></label>');
 const report = dialog('report-dialog','Report listing','<label class="nl-field">Reason<textarea name="reason" required maxlength="500" rows="3"></textarea></label>');
@@ -193,6 +218,10 @@ function changeCategories() {
   const form = listing.querySelector('form');
   form.elements.category.replaceChildren(...categories[form.elements.kind.value].map(value => new Option(value)));
 }
+$('#listing-location').onclick = () => perform(async () => {
+  listingLocation = await locate();
+  $('#listing-location-status').textContent = 'Approximate location added.';
+});
 const photoInput = listing.querySelector('[name="photo"]');
 const photoPreview = listing.querySelector('.nl-upload-preview');
 let previewUrl;
@@ -213,6 +242,8 @@ photoInput.onchange = () => {
 listing.addEventListener('close',clearPhotoPreview);
 listing.querySelector('[name="kind"]').onchange = changeCategories;
 function openListing(kind) {
+  listingLocation = null;
+  $('#listing-location-status').textContent = 'Optional. Your approximate location will be public.';
   return requireUser(() => {
     const form = listing.querySelector('form');
     form.reset();
@@ -225,6 +256,7 @@ submit(listing, async form => {
   const body = Object.fromEntries(form);
   const file = body.photo;
   body.price = Number(body.price);
+  if (listingLocation) Object.assign(body,listingLocation);
   if (!file.size) throw Error('Choose a photo of the item or your work.');
   body.photo = '';
   if (file.size) {
@@ -264,7 +296,13 @@ function card(item) {
 }
 function render() {
   const available = [...items, ...examples.filter(example => !items.some(item => item.kind === example.kind))];
-  const matches = available.filter(item => [item.title,item.category,item.area,item.name,item.description].some(text => text?.toLowerCase().includes(query)));
+  let matches = available.filter(item => [item.title,item.category,item.area,item.name,item.description].some(text => text?.toLowerCase().includes(query)));
+  if (visitorLocation) {
+    matches = matches.filter(item => kilometres(item) != null && kilometres(item) <= radius);
+    matches.sort((a,b) => kilometres(a) - kilometres(b));
+  }
+  document.querySelectorAll('.nearby-status').forEach(node => node.textContent =
+    visitorLocation ? 'Showing listings within ' + radius + ' km, nearest first.' : 'Search by neighbourhood or use your location.');
   const grid = (id, rows, fallback) => { $(id).innerHTML = rows.map(item => item.photo ? exampleCard(item) : card(item)).join('') || empty(fallback); };
   grid('#home-grid',matches.filter(item => filters.home === 'all' || item.kind === filters.home),'No matching listings.');
   grid('#rentals-grid',matches.filter(item => item.kind === 'gear' && (filters.rentals === 'all' || groups[item.category] === filters.rentals)),'No matching gear.');
@@ -344,6 +382,47 @@ async function openThread(id) {
   }
   if (timeline.childElementCount) chat.append(timeline);
   const owner = thread.owner === user.id;
+  if (thread.payment_status) chat.append(' · Demo payment ' + thread.payment_status);
+  if (!owner && thread.status === 'accepted') {
+    const pay = document.createElement('button');
+    pay.className = 'btn primary';
+    pay.textContent = thread.payment_status === 'succeeded' ? 'View demo receipt' : 'Demo checkout';
+    pay.onclick = () => perform(async () => {
+      const checkout = await api('/requests/' + id + '/checkout');
+      const panel = document.createElement('dialog');
+      panel.className = 'nl-dialog';
+      const heading = document.createElement('h2');
+      heading.textContent = 'Demo checkout';
+      const summary = document.createElement('p');
+      summary.textContent = 'Simulated payment. No money is collected. Total ₹' + (checkout.amount / 100).toLocaleString('en-IN') + ' for ' + checkout.days + (thread.kind === 'gear' ? ' calendar day(s).' : ' job.');
+      panel.append(heading,summary);
+      for (const outcome of checkout.status === 'succeeded' ? [] : ['succeeded','failed']) {
+        const action = document.createElement('button');
+        action.className = 'btn';
+        action.textContent = outcome === 'succeeded' ? 'Simulate success' : 'Simulate failure';
+        action.onclick = () => perform(async () => {
+          panel.querySelectorAll('button').forEach(button => button.disabled = true);
+          try {
+            await api('/requests/' + id + '/checkout','POST',{outcome});
+            panel.close();
+            await refresh();
+            await openThread(id);
+            toast(outcome === 'succeeded' ? 'Demo payment recorded.' : 'Demo payment failed. You can retry.');
+          } finally { panel.querySelectorAll('button').forEach(button => button.disabled = false); }
+        });
+        panel.append(action);
+      }
+      const close = document.createElement('button');
+      close.className = 'btn';
+      close.textContent = 'Close';
+      close.onclick = () => panel.close();
+      panel.append(close);
+      panel.addEventListener('close',() => panel.remove());
+      document.body.append(panel);
+      panel.showModal();
+    });
+    chat.append(' ',pay);
+  }
   const transitions = {
     pending: owner ? ['accepted','declined'] : ['cancelled'],
     accepted: owner ? [thread.kind === 'gear' ? 'active' : 'completion_proposed','cancelled'] : ['cancelled'],
@@ -441,13 +520,29 @@ function search(value) {
 }
 $('#search-btn').onclick = () => search($('#global-search').value);
 $('#global-search').onkeydown = event => { if (event.key === 'Enter') $('#search-btn').click(); };
-for (const name of ['rentals','services']) {
+for (const name of ['home','rentals','services']) {
   const form = document.createElement('form');
   form.className = 'nl-controls';
   form.setAttribute('role','search');
   form.innerHTML = '<input type="search" aria-label="Search by neighbourhood or listing" placeholder="Search by neighbourhood or listing"><button class="btn">Search</button>';
   form.onsubmit = event => { event.preventDefault(); search(form.querySelector('input').value); };
-  $('#view-' + name + ' .page-title').after(form);
+  const controls = document.createElement('div');
+  controls.className = 'nl-controls';
+  controls.innerHTML = '<button type="button" class="btn" data-nearby>Use my location</button>' +
+    '<label>Within <select aria-label="Distance"><option value="5">5 km</option><option value="10" selected>10 km</option><option value="25">25 km</option></select></label>' +
+    '<button type="button" class="btn" data-clear>Show all</button><span class="nearby-status" role="status"></span>';
+  controls.querySelector('[data-nearby]').onclick = () => perform(async () => {
+    visitorLocation = await locate();
+    render();
+  });
+  controls.querySelector('select').onchange = event => {
+    radius = Number(event.target.value);
+    document.querySelectorAll('select[aria-label="Distance"]').forEach(select => select.value = String(radius));
+    render();
+  };
+  controls.querySelector('[data-clear]').onclick = () => { visitorLocation = null; render(); };
+  form.append(controls);
+  $('#view-' + name + (name === 'home' ? ' .hero' : ' .page-title')).after(form);
 }
 $('#message-form').onsubmit = event => {
   event.preventDefault();

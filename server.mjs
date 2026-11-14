@@ -10,8 +10,8 @@ const fail = (status, message) => { throw Object.assign(new Error(message), { st
 const all = async (sql, ...args) => (await query(sql, args)).rows;
 const get = async (sql, ...args) => (await all(sql, ...args))[0];
 const run = async (sql, ...args) => query(sql, args);
-const listings = 'SELECT l.id,l.owner,l.kind,l.title,l.category,l.price,l.area,l.description,l.active,(l.photo IS NOT NULL) AS hasPhoto,u.name FROM listings l JOIN users u ON u.id=l.owner';
-const threads = 'SELECT r.*,l.price AS listing_price,(SELECT score FROM ratings WHERE booking=r.id) AS score,l.title,l.owner,l.kind,u.name AS "requesterName",o.name AS "ownerName" FROM requests r JOIN listings l ON l.id=r.listing JOIN users u ON u.id=r.requester JOIN users o ON o.id=l.owner';
+const listings = 'SELECT l.id,l.owner,l.kind,l.title,l.category,l.price,l.area,l.latitude,l.longitude,l.description,l.active,(l.photo IS NOT NULL) AS hasPhoto,u.name FROM listings l JOIN users u ON u.id=l.owner';
+const threads = 'SELECT r.*,(SELECT status FROM demo_payments WHERE booking=r.id) AS payment_status,l.price AS listing_price,(SELECT score FROM ratings WHERE booking=r.id) AS score,l.title,l.owner,l.kind,u.name AS "requesterName",o.name AS "ownerName" FROM requests r JOIN listings l ON l.id=r.listing JOIN users u ON u.id=r.requester JOIN users o ON o.id=l.owner';
 const assets = new Map([['/', ['index.html','text/html']], ['/login', ['index.html','text/html']], ['/app.js',['app.js','text/javascript']], ['/app.css',['app.css','text/css']]]);
 for (const name of ['camera','tent','bicycle']) {
   assets.set('/examples/' + name + '.jpg', ['photos/' + name + '.jpg','image/jpeg']);
@@ -105,7 +105,7 @@ async function api(req, res, path) {
     threads: await all(threads + ' WHERE r.requester=? OR l.owner=? ORDER BY r.id DESC', user.id, user.id),
     reports: admin ? await all('SELECT reports.*,listings.title FROM reports JOIN listings ON listings.id=reports.listing WHERE reports.status=?', 'open') : []
   };
-  const match = path.match(/^\/(listings|saved|requests|reports)\/(\d+)(?:\/(messages|rating))?$/);
+  const match = path.match(/^\/(listings|saved|requests|reports)\/(\d+)(?:\/(messages|rating|checkout))?$/);
   const id = match && Number(match[2]);
   if (method === 'POST' && path === '/listings') {
     const body = await json(req);
@@ -113,9 +113,15 @@ async function api(req, res, path) {
     const category = field(body, 'category', 20);
     const categories = { gear: ['Tools','Tech & Camera','Outdoors'], help: ['Home repair','Creative','Lessons'] };
     if (!categories[kind]?.includes(category) || !Number.isInteger(body.price) || body.price < 0 || body.price > 10000000) fail(400, 'Choose a category and enter a valid whole-rupee price.');
+    const hasCoordinates = body.latitude != null || body.longitude != null;
+    if (hasCoordinates && (typeof body.latitude !== 'number' || typeof body.longitude !== 'number' ||
+      !Number.isFinite(body.latitude) || !Number.isFinite(body.longitude) ||
+      Math.abs(body.latitude) > 90 || Math.abs(body.longitude) > 180)) fail(400,'Invalid listing location.');
+    const latitude = hasCoordinates ? Math.round(body.latitude * 100) / 100 : null;
+    const longitude = hasCoordinates ? Math.round(body.longitude * 100) / 100 : null;
     const photo = field(body, 'photo', 1400000, false);
     if (photo && !/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(photo)) fail(400, 'Use a JPEG, PNG, or WebP photo.');
-    return { id: (await get('INSERT INTO listings(owner,kind,title,category,price,area,description,photo) VALUES(?,?,?,?,?,?,?,?) RETURNING id', user.id,kind,field(body,'title',100),category,body.price,field(body,'area',100),field(body,'description',1200),photo || null)).id };
+    return { id: (await get('INSERT INTO listings(owner,kind,title,category,price,area,description,photo,latitude,longitude) VALUES(?,?,?,?,?,?,?,?,?,?) RETURNING id', user.id,kind,field(body,'title',100),category,body.price,field(body,'area',100),field(body,'description',1200),photo || null,latitude,longitude)).id };
   }
   if (match?.[1] === 'listings' && method === 'DELETE') {
     if (!await get('SELECT id FROM listings WHERE id=? AND owner=?', id,user.id)) fail(404,'Listing unavailable.');
@@ -149,6 +155,21 @@ async function api(req, res, path) {
     if (match[3] === 'messages' && method === 'POST') {
       await run('INSERT INTO messages(request,sender,body) VALUES(?,?,?)', id, user.id, field(await json(req), 'message', 2000));
       return { ok: true };
+    }
+    if (match[3] === 'checkout') {
+      const days = thread.kind === 'gear' && thread.start_date && thread.end_date
+        ? Math.round((Date.parse(thread.end_date) - Date.parse(thread.start_date)) / 86400000) + 1 : 1;
+      const amount = Math.round(Number(thread.agreed_price) * 100) * days;
+      const existing = await get('SELECT * FROM demo_payments WHERE booking=?', id);
+      if (method === 'GET') return { mode:'demo', amount, currency:'INR', days, status:existing?.status || 'unpaid' };
+      if (method === 'POST') {
+        if (thread.requester !== user.id) fail(403,'Only the customer can use checkout.');
+        if (thread.status !== 'accepted' || thread.agreed_price == null || !Number.isSafeInteger(amount)) fail(409,'Checkout requires an accepted booking.');
+        const { outcome } = await json(req);
+        if (!['succeeded','failed'].includes(outcome)) fail(400,'Choose a demo payment outcome.');
+        await run("INSERT INTO demo_payments(booking,amount,currency,status,updated) VALUES(?,?,'INR',?,?) ON CONFLICT(booking) DO UPDATE SET status=excluded.status,updated=excluded.updated WHERE demo_payments.status <> 'succeeded'", id,amount,outcome,new Date().toISOString());
+        return await get('SELECT * FROM demo_payments WHERE booking=?',id);
+      }
     }
     if (match[3] === 'rating' && method === 'POST') {
       if (thread.requester !== user.id || thread.status !== 'completed') fail(403, 'Only the customer can review a completed booking.');
