@@ -13,7 +13,7 @@ test('marketplace permissions, requests, messages, and moderation', async t => {
   const origin = 'http://127.0.0.1:' + String(output).trim().split(' ').at(-1);
   function client() {
     let cookie = '';
-    return async (path, expected = 200, method = 'GET', body) => {
+    const request = async (path, expected = 200, method = 'GET', body) => {
       const headers = { cookie };
       if (body) headers['Content-Type'] = 'application/json';
       const res = await fetch(origin + '/api/v1' + path, {method,headers,body:body && JSON.stringify(body)});
@@ -22,10 +22,24 @@ test('marketplace permissions, requests, messages, and moderation', async t => {
       assert.equal(res.status,expected,JSON.stringify(data));
       return data;
     };
+    request.cookie = () => cookie;
+    return request;
   }
   const owner = client(), borrower = client(), outsider = client(), admin = client();
+  for (const path of ['/', '/landing.html', '/borrow.html']) {
+    const response = await fetch(origin + path, {redirect:'manual'});
+    assert.equal(response.status,302);
+    assert.equal(response.headers.get('location'),'/login');
+  }
+  assert.equal((await fetch(origin + '/api/v1/listings')).status,401);
   const account = (name, adminCode) => ({name,email:name + '@example.test',password:'sample-test-passphrase',adminCode});
   await owner('/signup',200,'POST',account('owner'));
+  assert.equal((await fetch(origin + '/', {headers:{cookie:owner.cookie()},redirect:'manual'})).status,200);
+  assert.equal((await fetch(origin + '/landing.html', {headers:{cookie:owner.cookie()},redirect:'manual'})).status,200);
+  assert.equal((await fetch(origin + '/borrow.html', {headers:{cookie:owner.cookie()},redirect:'manual'})).status,200);
+  const loginRedirect = await fetch(origin + '/login', {headers:{cookie:owner.cookie()},redirect:'manual'});
+  assert.equal(loginRedirect.status,302);
+  assert.equal(loginRedirect.headers.get('location'),'/');
   await borrower('/signup',200,'POST',account('borrower'));
   await outsider('/signup',200,'POST',account('outsider'));
   await admin('/signup',403,'POST',account('admin'));
@@ -83,7 +97,9 @@ test('marketplace permissions, requests, messages, and moderation', async t => {
   assert.deepEqual(await borrower('/listings'),[]);
   await borrower('/logout',200,'POST');
   await borrower('/activity',401);
+  assert.equal((await fetch(origin + '/', {headers:{cookie:borrower.cookie()},redirect:'manual'})).status,302);
   await borrower('/login',200,'POST',account('borrower'));
+  assert.equal((await fetch(origin + '/', {headers:{cookie:borrower.cookie()},redirect:'manual'})).status,200);
   assert.equal((await borrower('/activity')).threads[0].status,'completed');
   assert.equal((await fetch(origin + '/login')).status,200);
   const page = await fetch(origin);

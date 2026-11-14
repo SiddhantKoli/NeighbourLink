@@ -6,7 +6,7 @@ const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({
 const categories = { gear: ['Tools','Tech & Camera','Outdoors'], help: ['Home repair','Creative','Lessons'] };
 const groups = { Tools:'tools', 'Tech & Camera':'tech', Outdoors:'outdoors', 'Home repair':'home', Creative:'creative', Lessons:'lessons' };
 const filters = { home:'all', rentals:'all', services:'all' };
-const views = ['landing','home','rentals','services','saved','messages','dashboard','login'];
+const views = ['landing','home','rentals','services','saved','messages','dashboard','login','profile'];
 const examples = [
   { kind:'gear', title:'Digital camera kit', category:'Tech & Camera', area:'Indiranagar, Bengaluru', description:'Camera with lens and strap for a weekend shoot.', price:900, photo:'camera' },
   { kind:'gear', title:'Two-person camping tent', category:'Outdoors', area:'Domlur, Bengaluru', description:'Compact tent for a short camping trip.', price:400, photo:'tent' },
@@ -26,6 +26,8 @@ let activity = { saved:[], threads:[], listings:[], reports:[] };
 let threadId = null;
 let query = '';
 let visitorLocation = null;
+let visitorArea = '';
+let activeMessages = [];
 let listingLocation = null;
 let radius = 10;
 function kilometres(item) {
@@ -37,19 +39,19 @@ function kilometres(item) {
     Math.cos(radians(item.latitude)) * Math.sin(dLon / 2) ** 2;
   return 6371 * 2 * Math.asin(Math.sqrt(Math.min(1,a)));
 }
-function locate() {
+function locate(precision = 2) {
   return new Promise((resolve,reject) => {
     if (!navigator.geolocation) return reject(Error('Location is unavailable. Search by neighbourhood instead.'));
     navigator.geolocation.getCurrentPosition(position => resolve({
-      latitude: Math.round(position.coords.latitude * 100) / 100,
-      longitude: Math.round(position.coords.longitude * 100) / 100
+      latitude: Number(position.coords.latitude.toFixed(precision)),
+      longitude: Number(position.coords.longitude.toFixed(precision))
     }), error => reject(Error(error.code === 1 ? 'Location access declined. Search by neighbourhood instead.' :
       'Could not find your location. Search by neighbourhood instead.')),
     {enableHighAccuracy:false,timeout:15000,maximumAge:300000});
   });
 }
 let afterSignIn;
-let signInReturn = 'home';
+let signInReturn = 'landing';
 let toastTimer;
 const accountButton = document.createElement('button');
 accountButton.className = 'btn nl-account';
@@ -84,17 +86,26 @@ function dialog(id, heading, fields) {
   return node;
 }
 const authFields =
-  '<label class="nl-field">Name<input name="name" maxlength="80" autocomplete="name"></label>' +
-  '<label class="nl-field">Email<input name="email" type="email" required maxlength="254" autocomplete="email"></label>' +
-  '<label class="nl-field">Password<input name="password" type="password" required minlength="12" maxlength="128"></label>' +
-  '<button class="btn" type="button" id="auth-mode"></button>';
+  '<label class="auth-field">Your name<input name="name" maxlength="80" autocomplete="name" placeholder="How should neighbours call you?"></label>' +
+  '<label class="auth-field">Email address<input name="email" type="email" required maxlength="254" autocomplete="email" placeholder="you@example.com"></label>' +
+  '<div class="auth-field"><label for="auth-password">Password</label><div class="auth-password-wrap"><input id="auth-password" name="password" type="password" required minlength="12" maxlength="128" autocomplete="current-password" placeholder="At least 12 characters"><button type="button" id="password-toggle" aria-label="Show password" aria-pressed="false">Show</button></div></div>';
 const auth = $('#login-panel');
-auth.innerHTML = '<h1 id="account-dialog-title">Sign in</h1><form>' + authFields +
-  '<p role="alert" class="nl-error"></p><div class="nl-controls"><button class="btn primary">Sign in</button>' +
-  '<button class="btn" type="button" id="cancel-login">Back</button></div></form>';
-$('#cancel-login').onclick = () => {
-  afterSignIn = undefined;
-  perform(() => navigate(signInReturn));
+auth.innerHTML = '<div class="auth-heading"><span class="auth-eyebrow">WELCOME TO NEIGHBOURLINK</span><h1 id="account-dialog-title">Welcome back.</h1>' +
+  '<p id="auth-intro">Sign in to share more with the people around you.</p></div><form>' + authFields +
+  '<p role="alert" class="nl-error"></p><button class="btn primary auth-submit" type="submit">Sign in</button>' +
+  '<p class="auth-switch"><span id="auth-switch-prompt">New around here?</span> <button type="button" id="auth-mode">Create an account</button></p></form>';
+$('#password-toggle').onclick = () => {
+  const field = $('#auth-password');
+  const visible = field.type === 'password';
+  field.type = visible ? 'text' : 'password';
+  $('#password-toggle').textContent = visible ? 'Hide' : 'Show';
+  $('#password-toggle').setAttribute('aria-label',visible ? 'Hide password' : 'Show password');
+  $('#password-toggle').setAttribute('aria-pressed',String(visible));
+};
+$('#login-theme').onclick = () => {
+  const next = document.body.dataset.theme === 'dark' ? 'light' : 'dark';
+  document.body.dataset.theme = next;
+  try { localStorage.setItem('nl-theme',next); } catch {}
 };
 $('#listing-modal').remove();
 const listing = dialog('listing-dialog','Put it to use.',
@@ -154,6 +165,14 @@ async function api(path, method = 'GET', body) {
     method, headers: body ? { 'Content-Type':'application/json' } : {}, body: body ? JSON.stringify(body) : undefined
   });
   const data = await response.json();
+  if (response.status === 403 && path !== '/profile') { navigate('profile'); throw Error(data.error || 'Complete your profile to continue.'); }
+  if (response.status === 401 && !['/login','/signup'].includes(path)) {
+    user = null;
+    items = [];
+    activity = {saved:[],threads:[],listings:[],reports:[]};
+    deactivateProtectedFrames();
+    navigate('login');
+  }
   if (!response.ok) throw Error(data.error || 'Request failed.');
   return data;
 }
@@ -183,15 +202,25 @@ function show(dialog) {
 }
 function renderAuth(signup) {
   auth.dataset.mode = signup ? 'signup' : 'login';
-  $('#account-dialog-title').textContent = signup ? 'Create account' : 'Sign in';
+  $('#account-dialog-title').textContent = signup ? 'Join the neighbourhood.' : 'Welcome back.';
+  $('#auth-intro').textContent = signup ? 'Create your account to borrow, offer help, and connect nearby.' : 'Sign in to share more with the people around you.';
   const name = auth.querySelector('[name="name"]');
   name.parentElement.hidden = !signup;
   name.parentElement.style.display = signup ? 'grid' : 'none';
   name.required = signup;
   auth.querySelector('[name="password"]').autocomplete = signup ? 'new-password' : 'current-password';
   auth.querySelector('.primary').textContent = signup ? 'Create account' : 'Sign in';
-  $('#auth-mode').textContent = signup ? 'Already have an account?' : 'Create an account';
+  $('#auth-switch-prompt').textContent = signup ? 'Already a member?' : 'New around here?';
+  $('#auth-mode').textContent = signup ? 'Sign in' : 'Create an account';
   auth.querySelector('.nl-error').textContent = '';
+}
+function activateProtectedFrames() {
+  document.querySelectorAll('iframe[data-src]').forEach(frame => {
+    if (!frame.hasAttribute('src')) frame.src = frame.dataset.src;
+  });
+}
+function deactivateProtectedFrames() {
+  document.querySelectorAll('iframe[data-src]').forEach(frame => frame.removeAttribute('src'));
 }
 function requireUser(action) {
   if (user) return action();
@@ -204,6 +233,11 @@ $('#auth-mode').onclick = () => renderAuth(auth.dataset.mode !== 'signup');
 submit(auth, async form => {
   await api('/' + auth.dataset.mode, 'POST', Object.fromEntries(form));
   user = await api('/session');
+  if (!user.profileComplete) {
+    await navigate('profile');
+    return;
+  }
+  activateProtectedFrames();
   const destination = signInReturn;
   auth.querySelector('form').reset();
   await refresh();
@@ -212,6 +246,44 @@ submit(auth, async form => {
   await navigate(destination);
   if (next) await next();
 });
+const profileForm = $('#profile-form');
+profileForm.elements.name.value = '';
+profileForm.addEventListener('submit',event => {
+  event.preventDefault();
+  const button = profileForm.querySelector('.auth-submit');
+  button.disabled = true;
+  $('#profile-error').textContent = '';
+  perform(async () => {
+    try {
+      const file = profileForm.elements.photoFile.files[0];
+      if (!file || file.size > 1000000 || !['image/jpeg','image/png','image/webp'].includes(file.type)) throw Error('Choose a JPEG, PNG, or WebP face photo under 1 MB.');
+      const photo = await new Promise((resolve,reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(Error('Could not read that photo.'));
+        reader.readAsDataURL(file);
+      });
+      await api('/profile','PUT',{name:profileForm.elements.name.value,email:profileForm.elements.email.value,phone:profileForm.elements.phone.value,photo});
+      user = await api('/session');
+      activateProtectedFrames();
+      await refresh();
+      await navigate('landing');
+    } catch(error) { $('#profile-error').textContent = error.message; }
+    finally { button.disabled = false; }
+  });
+});
+profileForm.elements.photoFile.addEventListener('change',() => {
+  const file = profileForm.elements.photoFile.files[0];
+  const preview = $('#profile-preview');
+  if (!file || file.size > 1000000 || !['image/jpeg','image/png','image/webp'].includes(file.type)) { preview.hidden = true; return; }
+  preview.src = URL.createObjectURL(file);
+  preview.hidden = false;
+});
+$('#profile-theme').onclick = () => {
+  const next = document.body.dataset.theme === 'dark' ? 'light' : 'dark';
+  document.body.dataset.theme = next;
+  try { localStorage.setItem('nl-theme',next); } catch {}
+};
 accountButton.onclick = () => perform(() => user ? navigate('dashboard') : requireUser(() => navigate('dashboard')));
 
 function changeCategories() {
@@ -303,7 +375,7 @@ function render() {
   }
   document.querySelectorAll('.nearby-status').forEach(node => node.textContent =
     visitorLocation ? 'Showing listings within ' + radius + ' km, nearest first.' : 'Search by neighbourhood or use your location.');
-  const grid = (id, rows, fallback) => { $(id).innerHTML = rows.map(item => item.photo ? exampleCard(item) : card(item)).join('') || empty(fallback); };
+  const grid = (id, rows, fallback) => { const node = $(id); if (node) node.innerHTML = rows.map(item => item.photo ? exampleCard(item) : card(item)).join('') || empty(fallback); };
   grid('#home-grid',matches.filter(item => filters.home === 'all' || item.kind === filters.home),'No matching listings.');
   grid('#rentals-grid',matches.filter(item => item.kind === 'gear' && (filters.rentals === 'all' || groups[item.category] === filters.rentals)),'No matching gear.');
   grid('#services-grid',matches.filter(item => item.kind === 'help' && (filters.services === 'all' || groups[item.category] === filters.services)),'No matching services.');
@@ -314,7 +386,72 @@ function render() {
     document.querySelectorAll('#' + id + ' .chip').forEach(chip => chip.classList.toggle('active',chip.dataset.filter === filters[key]));
   }
   renderActivity();
+  updateBorrow();
 }
+function updateBorrow() {
+  const frame = $('.borrow-frame');
+  let theme = 'light';
+  try { theme = localStorage.getItem('nl-theme') || 'light'; } catch {}
+  frame?.contentWindow?.postMessage({source:'neighbourlink-app',items,activity,user,location:visitorLocation,area:visitorArea,view,threadId,messages:activeMessages,theme},location.origin);
+}
+$('.borrow-frame').addEventListener('load',updateBorrow);
+window.addEventListener('message',event => {
+  if (event.origin !== location.origin || event.source !== $('.borrow-frame').contentWindow || event.data?.source !== 'neighbourlink-borrow') return;
+  const {action,id} = event.data;
+  perform(async () => {
+    if (action === 'ready') return updateBorrow();
+    if (action === 'login') { const destination = view; return requireUser(() => navigate(destination)); }
+    if (action === 'navigate') {
+      if (['saved','messages'].includes(id) && !user) return requireUser(() => navigate(id));
+      if (id === 'messages' && user) await refresh();
+      return navigate(id);
+    }
+    if (action === 'list') return openListing(id === 'services' ? 'help' : 'gear');
+    if (action === 'location') {
+      visitorArea = 'Finding your area…';
+      updateBorrow();
+      try { visitorLocation = await locate(3); }
+      catch { visitorArea = 'Location access off'; updateBorrow(); return; }
+      visitorArea = visitorLocation.latitude.toFixed(3) + ', ' + visitorLocation.longitude.toFixed(3);
+      render();
+      try {
+        const url = new URL('https://api.bigdatacloud.net/data/reverse-geocode-client');
+        url.searchParams.set('latitude',visitorLocation.latitude);
+        url.searchParams.set('longitude',visitorLocation.longitude);
+        url.searchParams.set('localityLanguage','en');
+        const response = await fetch(url);
+        if (response.ok) {
+          const place = await response.json();
+          const parts = [place.locality,place.city].filter((part,index,list) => part && list.indexOf(part) === index);
+          visitorArea = parts.join(', ') || place.principalSubdivision || visitorArea;
+          updateBorrow();
+        }
+      } catch { toast('Showing your coordinates. Area name is unavailable.'); }
+      return;
+    }
+    if (action === 'thread') return openThread(id);
+    if (action === 'message') {
+      if (!threadId || !event.data.text?.trim()) return;
+      await api('/requests/' + threadId + '/messages','POST',{message:event.data.text.trim()});
+      return openThread(threadId);
+    }
+    if (action === 'logout') { await api('/logout','POST'); user = null; threadId = null; activeMessages = []; items = []; deactivateProtectedFrames(); return navigate('login'); }
+    if (action === 'remove' && confirm('Unpublish this listing?')) { await api('/listings/' + id,'DELETE'); return refresh(); }
+    if (action === 'save') return requireUser(async () => {
+      await api('/saved/' + id,activity.saved.includes(id) ? 'DELETE' : 'PUT');
+      await refresh();
+    });
+    if (action === 'request') return requireUser(async () => {
+      await refresh();
+      const existing = activity.threads.find(thread => thread.listing === id && thread.requester === user.id);
+      if (existing) { threadId = existing.id; return navigate('messages'); }
+      const item = items.find(item => item.id === id);
+      if (item) openBooking(item);
+      else toast('Listing unavailable.');
+    });
+    if (action === 'report') return requireUser(() => { reportedId = id; show(report); });
+  });
+});
 function renderActivity() {
   $('#activity').innerHTML = user ? '<div class="nl-controls"><strong>' + escape(user.name) + '</strong><button class="btn" data-logout>Sign out</button></div><h2>Your listings</h2>' +
     (activity.listings.map(item => '<div class="nl-record">' + escape(item.title) + (item.active ? ' <button class="btn" data-remove="' + item.id + '">Unpublish</button>' : ' · Unpublished') + '</div>').join('') || '<p>No listings yet.</p>') +
@@ -329,18 +466,31 @@ async function refresh() {
   render();
 }
 function navigate(next, updateHash = true) {
+  if (!user && next !== 'login') { next = 'login'; updateHash = true; }
+  if (user && !user.profileComplete && !['profile','login'].includes(next)) { next = 'profile'; updateHash = true; }
+  if (next === 'home') next = 'rentals';
   if (!views.includes(next)) next = 'landing';
   view = next;
-  const route = next === 'landing' ? '/' : next === 'login' ? '/login' : '/#' + next;
+  const route = next === 'landing' ? '/' : next === 'login' ? '/login' : next === 'profile' ? '/profile' : '/#' + next;
   if (updateHash && location.pathname + location.hash !== route) history.pushState(null,'',route);
-  document.body.classList.toggle('nl-login',next === 'login');
+  document.body.classList.toggle('nl-login',['login','profile'].includes(next));
   if (next === 'login') {
+    if (!afterSignIn) signInReturn = 'landing';
+    try { document.body.dataset.theme = localStorage.getItem('nl-theme') || 'light'; } catch { document.body.dataset.theme = 'light'; }
     renderAuth(false);
     requestAnimationFrame(() => auth.querySelector('[name="email"]').focus());
   }
-  document.querySelectorAll('.view').forEach(section => section.classList.toggle('active',section.id === 'view-' + next));
+  if (next === 'profile') {
+    profileForm.elements.name.value = user?.name || '';
+    profileForm.elements.email.value = user?.email || '';
+    try { document.body.dataset.theme = localStorage.getItem('nl-theme') || 'light'; } catch { document.body.dataset.theme = 'light'; }
+  }
+  const portal = ['rentals','services','saved','messages','dashboard'].includes(next);
+  document.querySelectorAll('.view').forEach(section => section.classList.toggle('active',section.id === 'view-' + (portal ? 'rentals' : next)));
   document.querySelectorAll('[data-view]').forEach(button => button.classList.toggle('active',button.dataset.view === next));
   $('.shell').classList.toggle('landing',next === 'landing');
+  $('.shell').classList.toggle('borrowing',portal);
+  updateBorrow();
   document.body.classList.toggle('nl-landing',next === 'landing');
   $('#crumb').textContent = next.toUpperCase();
   window.scrollTo(0,0);
@@ -358,6 +508,8 @@ async function openThread(id) {
   form.style.display = thread ? '' : 'none';
   if (!thread) {
     chat.textContent = 'Choose a request';
+    activeMessages = [];
+    updateBorrow();
     return;
   }
   chat.textContent = thread.title + ' · ' + thread.status;
@@ -450,6 +602,8 @@ async function openThread(id) {
   }
   const rows = await api('/requests/' + id + '/messages');
   if (threadId !== id || view !== 'messages') return;
+  activeMessages = rows;
+  updateBorrow();
   messages.replaceChildren(...rows.map(message => {
     const bubble = document.createElement('div');
     bubble.className = 'bubble' + (message.sender === user.id ? ' me' : '');
@@ -510,8 +664,10 @@ document.addEventListener('click', event => perform(async () => {
     await api('/logout','POST');
     user = null;
     threadId = null;
-    await refresh();
-    navigate('home');
+    activeMessages = [];
+    items = [];
+    deactivateProtectedFrames();
+    navigate('login');
   }
 }));
 function search(value) {
@@ -520,7 +676,7 @@ function search(value) {
 }
 $('#search-btn').onclick = () => search($('#global-search').value);
 $('#global-search').onkeydown = event => { if (event.key === 'Enter') $('#search-btn').click(); };
-for (const name of ['home','rentals','services']) {
+for (const name of ['home','services']) {
   const form = document.createElement('form');
   form.className = 'nl-controls';
   form.setAttribute('role','search');
@@ -559,11 +715,17 @@ $('#message-form').onsubmit = event => {
     } finally { button.disabled = false; }
   });
 };
-function currentRoute() { return location.pathname === '/login' ? 'login' : location.hash.slice(1) || 'landing'; }
-window.addEventListener('popstate',() => perform(() => navigate(currentRoute(),false)));
+function currentRoute() { return location.pathname === '/login' ? 'login' : location.pathname === '/profile' ? 'profile' : location.hash.slice(1) || 'landing'; }
+window.addEventListener('popstate',() => perform(() => navigate(currentRoute(),Boolean(!user))));
 perform(async () => {
-  await navigate(currentRoute(),false);
-  user = await api('/session');
-  await refresh();
-  if (view === 'messages') await openThread(threadId);
+  const requested = currentRoute();
+  try { user = await api('/session'); } catch { user = null; }
+  try {
+    if (!user) return navigate('login');
+    if (!user.profileComplete) return navigate('profile');
+    activateProtectedFrames();
+    await navigate(requested === 'login' ? 'landing' : requested,requested === 'login');
+    await refresh();
+    if (view === 'messages') await openThread(threadId);
+  } finally { document.body.classList.remove('auth-loading'); }
 });

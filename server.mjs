@@ -12,7 +12,7 @@ const get = async (sql, ...args) => (await all(sql, ...args))[0];
 const run = async (sql, ...args) => query(sql, args);
 const listings = 'SELECT l.id,l.owner,l.kind,l.title,l.category,l.price,l.area,l.latitude,l.longitude,l.description,l.active,(l.photo IS NOT NULL) AS hasPhoto,u.name FROM listings l JOIN users u ON u.id=l.owner';
 const threads = 'SELECT r.*,(SELECT status FROM demo_payments WHERE booking=r.id) AS payment_status,l.price AS listing_price,(SELECT score FROM ratings WHERE booking=r.id) AS score,l.title,l.owner,l.kind,u.name AS "requesterName",o.name AS "ownerName" FROM requests r JOIN listings l ON l.id=r.listing JOIN users u ON u.id=r.requester JOIN users o ON o.id=l.owner';
-const assets = new Map([['/', ['index.html','text/html']], ['/login', ['index.html','text/html']], ['/app.js',['app.js','text/javascript']], ['/app.css',['app.css','text/css']]]);
+const assets = new Map([['/', ['index.html','text/html']], ['/login', ['index.html','text/html']], ['/profile', ['index.html','text/html']], ['/landing.html', ['landing.html','text/html']], ['/landing.js', ['landing.js','text/javascript']], ['/borrow.html', ['borrow.html','text/html']], ['/borrow.js', ['borrow.js','text/javascript']], ['/portal.js', ['portal.js','text/javascript']], ['/portal.css', ['portal.css','text/css']], ['/app.js',['app.js','text/javascript']], ['/app.css',['app.css','text/css']]]);
 for (const name of ['camera','tent','bicycle']) {
   assets.set('/examples/' + name + '.jpg', ['photos/' + name + '.jpg','image/jpeg']);
 }
@@ -58,10 +58,17 @@ async function session(res, user) {
 function cookie(res, token, age) {
   res.setHeader('Set-Cookie', 'nl_session=' + token + '; Path=/; HttpOnly; SameSite=Lax; Max-Age=' + age + (secure ? '; Secure' : ''));
 }
+function sessionToken(req) {
+  return req.headers.cookie?.match(/(?:^|; )nl_session=([a-f0-9]{64})(?:;|$)/)?.[1];
+}
+async function sessionUser(req) {
+  const token = sessionToken(req);
+  return token ? await get('SELECT u.id,u.name,u.email,u.phone,(u.phone IS NOT NULL AND u.profile_photo IS NOT NULL) AS "profileComplete" FROM sessions s JOIN users u ON u.id=s."user" WHERE token=? AND expires>?', digest(token), Date.now()) : null;
+}
 async function api(req, res, path) {
   const method = req.method;
-  const token = req.headers.cookie?.match(/(?:^|; )nl_session=([a-f0-9]{64})(?:;|$)/)?.[1];
-  const user = token && await get('SELECT u.id,u.name,u.email FROM sessions s JOIN users u ON u.id=s."user" WHERE token=? AND expires>?', digest(token), Date.now());
+  const token = sessionToken(req);
+  const user = await sessionUser(req);
   const admin = Boolean(user && process.env.ADMIN_EMAIL && user.email === process.env.ADMIN_EMAIL.toLowerCase());
   if (method !== 'GET') {
     if (req.headers['sec-fetch-site'] === 'cross-site') fail(403, 'Cross-site request denied.');
@@ -69,8 +76,7 @@ async function api(req, res, path) {
     const expected = process.env.PUBLIC_ORIGIN || 'http://' + req.headers.host;
     if (origin && origin !== expected) fail(403, 'Unexpected request origin.');
   }
-  if (method === 'GET' && path === '/session') return user ? { id: user.id, name: user.name, admin } : null;
-  if (method === 'GET' && path === '/listings') return await all(listings + ' WHERE l.active=1 ORDER BY l.id DESC');
+  if (method === 'GET' && path === '/session') return user ? { id: user.id, name: user.name, email:user.email, phone:user.phone, profileComplete:Boolean(user.profileComplete), admin } : null;
   if (method === 'POST' && ['/signup', '/login'].includes(path)) {
     throttle(req.socket.remoteAddress);
     const body = await json(req);
@@ -94,6 +100,22 @@ async function api(req, res, path) {
     return { ok: true };
   }
   if (!user) fail(401, 'Sign in to continue.');
+  if (!user.profileComplete && !['/profile'].includes(path)) fail(403,'Complete your profile to continue.');
+  if (method === 'GET' && path === '/profile') {
+    const profile = await get('SELECT name,email,phone,profile_photo FROM users WHERE id=?',user.id);
+    return {name:profile.name,email:profile.email,phone:profile.phone,photo:profile.profile_photo};
+  }
+  if (method === 'PUT' && path === '/profile') {
+    const body = await json(req);
+    const name = field(body,'name',80);
+    const phone = field(body,'phone',20).replace(/[\s()-]/g,'');
+    if (!/^\+?[1-9]\d{7,14}$/.test(phone)) fail(400,'Enter a valid phone number with country code.');
+    const photo = field(body,'photo',1400000);
+    if (!/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(photo) || Buffer.from(photo.split(',')[1],'base64').length > 1000000) fail(400,'Choose a JPEG, PNG, or WebP profile photo under 1 MB.');
+    await run('UPDATE users SET name=?,phone=?,profile_photo=? WHERE id=?',name,phone,photo,user.id);
+    return {ok:true};
+  }
+  if (method === 'GET' && path === '/listings') return await all(listings + ' WHERE l.active=1 ORDER BY l.id DESC');
   if (method === 'POST' && path === '/logout') {
     await run('DELETE FROM sessions WHERE token=?', digest(token));
     cookie(res, '', 0);
@@ -232,13 +254,23 @@ async function api(req, res, path) {
 }
 
 createServer(async (req,res) => {
+  const path = new URL(req.url, 'http://localhost').pathname;
+  const frameAncestors = ['/landing.html','/borrow.html'].includes(path) ? "'self'" : "'none'";
   res.setHeader('X-Content-Type-Options','nosniff');
   res.setHeader('Referrer-Policy','same-origin');
-  res.setHeader('Content-Security-Policy',"default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+  res.setHeader('Content-Security-Policy',"default-src 'self'; connect-src 'self' https://api.bigdatacloud.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' blob:; frame-src 'self'; frame-ancestors " + frameAncestors + "; base-uri 'none'; form-action 'self'");
   res.setHeader('Cache-Control','no-store');
   try {
-    const path = new URL(req.url, 'http://localhost').pathname;
-    if (path.startsWith('/api/v1/')) {
+    const viewer = ['/', '/login', '/profile', '/landing.html', '/borrow.html'].includes(path) ? await sessionUser(req) : null;
+    if (req.method === 'GET' && (path === '/' || path === '/landing.html' || path === '/borrow.html' || path === '/profile') && !viewer) {
+      res.writeHead(302, { Location:'/login' }).end();
+    } else if (req.method === 'GET' && path === '/login' && viewer) {
+      res.writeHead(302, { Location:'/' }).end();
+    } else if (req.method === 'GET' && ['/','/landing.html','/borrow.html'].includes(path) && viewer && !viewer.profileComplete) {
+      res.writeHead(302, { Location:'/profile' }).end();
+    } else if (req.method === 'GET' && path === '/profile' && viewer?.profileComplete) {
+      res.writeHead(302, { Location:'/' }).end();
+    } else if (path.startsWith('/api/v1/')) {
       const data = await api(req,res,path.slice(7));
       res.writeHead(200, {'Content-Type':'application/json; charset=utf-8'}).end(JSON.stringify(data));
     } else if (req.method === 'GET' && assets.has(path)) {
