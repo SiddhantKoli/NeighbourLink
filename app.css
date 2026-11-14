@@ -170,6 +170,30 @@ body.nl-login[data-theme="dark"] .login-form-side{background:radial-gradient(cir
 .admin-table-wrap table{border-collapse:collapse;min-width:680px;width:100%;font-size:14px}
 .admin-table-wrap th,.admin-table-wrap td{padding:10px;text-align:left;vertical-align:top;border:1px solid #858585}
 .admin-table-wrap th{background:#00edb0;color:#111}
+.seller-listing,.seller-center{margin:16px 0;padding:14px;border:2px solid var(--ink);box-shadow:4px 4px 0 var(--ink)}
+.shop-card{border:3px solid var(--ink);box-shadow:5px 5px 0 var(--ink);padding:18px;margin:18px 4px;background:var(--panel)}
+.shop-card .nl-controls,.shop-card form{display:flex;flex-wrap:wrap;align-items:end;gap:12px}
+.shop-card details{border-top:2px solid var(--ink);margin-top:14px;padding-top:12px}
+.shop-card summary{font-weight:700;cursor:pointer;min-height:36px}
+.shop-card li{font-size:14px;margin:8px 0}
+.shop-plan{display:inline-block;margin:8px 12px 8px 0}
+.shop-report{white-space:pre-wrap;overflow-wrap:anywhere;padding:12px;border:2px solid var(--ink)}
+.business-review-photo{display:block;max-width:min(100%,640px);max-height:480px;object-fit:contain;margin:12px 0;border:3px solid var(--ink);box-shadow:4px 4px 0 var(--ink)}
+.seller-listing details{padding-top:8px;border-top:1px solid #858585}
+.seller-listing summary{padding:8px 0;font-weight:700;cursor:pointer}
+.availability-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;align-items:end;padding:10px 0}
+.availability-list .nl-record{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.seller-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(175px,1fr));gap:12px;margin:14px 0}
+.seller-metrics article{display:grid;gap:6px;padding:12px;border:2px solid var(--ink);background:var(--paper,#fff)}
+.seller-metrics strong{font-size:20px}.seller-metrics span{font-size:14px}
+.account-policy-links{display:flex;gap:10px;flex-wrap:wrap;margin:24px 0;padding:16px;border-top:2px solid var(--ink)}
+.account-policy-links a{font-size:14px;font-weight:700;color:var(--ink);padding:8px 10px;border:2px solid var(--ink);box-shadow:3px 3px 0 var(--ink)}
+.nl-market-filters{flex-basis:100%;border:2px solid var(--ink);padding:8px 12px;background:var(--paper,#fff)}
+.nl-market-filters summary{cursor:pointer;font-weight:700}
+.nl-market-filters>div{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;padding-top:12px}
+.nl-market-filters label{display:grid;gap:5px;font-size:14px;font-weight:700}
+.nl-market-filters input,.nl-market-filters select{width:100%;min-width:0;min-height:42px;border:2px solid var(--ink);padding:8px;font:inherit;background:var(--paper,#fff)}
+.nl-market-filters .btn{align-self:end;min-height:46px}
 .nl-claim-summary{margin:18px 0;padding:16px;border:2px solid var(--ink);box-shadow:4px 4px 0 var(--ink)}
 .nl-claim-summary h3{margin-top:0}
 .claim-response{display:grid;gap:10px}

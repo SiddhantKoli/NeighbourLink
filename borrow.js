@@ -3,14 +3,14 @@ const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&
 const money = value => '₹' + Number(value || 0).toLocaleString('en-IN');
 let initialPortal = 'rentals';
 try { if (sessionStorage.getItem('nl-portal') === 'services') initialPortal = 'services'; } catch {}
-const state = {items:[], saved:[], user:null, location:null, area:'', view:'rentals', portal:initialPortal, activity:{saved:[],threads:[],listings:[]}, threadId:null, messages:[], category:'all', query:'', sort:'near', selected:null, radius:10, loading:true};
+const state = {items:[], saved:[], user:null, location:null, area:'', view:'rentals', portal:initialPortal, activity:{saved:[],threads:[],listings:[]}, threadId:null, messages:[], category:'all', query:'', sort:'near', selected:null, radius:10, loading:true, filtered:false};
 const categories = [['all','All gear'],['tools','Tools'],['tech','Tech & camera'],['outdoors','Outdoors']];
 const group = {'Tools':'tools','Tech & Camera':'tech','Outdoors':'outdoors'};
 const examples = [
   {id:-1,kind:'gear',title:'Digital camera kit',category:'Tech & Camera',area:'Example',description:'A camera kit could look like this.',price:900,photo:'/examples/camera.jpg',sample:true},
   {id:-2,kind:'gear',title:'Two-person camping tent',category:'Outdoors',area:'Example',description:'A camping tent could look like this.',price:400,photo:'/examples/tent.jpg',sample:true}
 ];
-const send = (action, id) => parent.postMessage({source:'neighbourlink-borrow',action,id},location.origin);
+const send = (action, id, filters) => parent.postMessage({source:'neighbourlink-borrow',action,id,filters},location.origin);
 const icon = name => '<svg class="ic"><use href="#i-' + name + '"/></svg>';
 
 function distance(item) {
@@ -23,7 +23,7 @@ function distance(item) {
   return 6371 * 2 * Math.asin(Math.sqrt(Math.min(1,a)));
 }
 function visibleItems() {
-  const source = state.items.some(item => item.kind === 'gear') ? state.items : examples;
+  const source = state.filtered ? state.items.filter(item=>item.kind==='gear') : state.items.some(item => item.kind === 'gear') ? state.items : examples;
   let rows = source.filter(item => item.kind === 'gear' && item.active !== false &&
     (state.category === 'all' || group[item.category] === state.category) &&
     [item.title,item.description,item.area,item.category].some(value => String(value || '').toLowerCase().includes(state.query)));
@@ -41,7 +41,7 @@ function render() {
   if (typeof renderChrome === 'function') renderChrome();
   if (state.view !== 'rentals' && typeof renderPortal === 'function') return renderPortal();
   const rows = visibleItems();
-  const allGear = (state.items.some(item => item.kind === 'gear') ? state.items : examples).filter(item => item.kind === 'gear' && item.active !== false);
+  const allGear = (state.filtered ? state.items : state.items.some(item => item.kind === 'gear') ? state.items : examples).filter(item => item.kind === 'gear' && item.active !== false);
   $('chips').innerHTML = categories.map(([key,label]) => '<button class="chip" type="button" data-category="' + key +
     '" aria-pressed="' + (state.category === key) + '">' + label + ' <em>' +
     allGear.filter(item => key === 'all' || group[item.category] === key).length + '</em></button>').join('');
@@ -54,7 +54,7 @@ function render() {
     '" aria-label="' + (state.saved.includes(item.id) ? 'Remove saved ' : 'Save ') + escapeHtml(item.title) + '">' + icon('heart') + '</button>') +
     '<div class="cb"><h3>' + escapeHtml(item.title) + '</h3><div class="meta">' + icon('pin') + escapeHtml(item.area) +
     (distance(item) == null ? '' : ' · ' + distance(item).toFixed(1) + ' km') + '</div><p>' + escapeHtml(item.description) +
-    '</p></div><div class="cf"><div class="price">' + money(item.price) + ' <small>/ day</small></div></div>' +
+    '</p>'+(item.owner_rating==null?'':'<div class="owner-rating">★ '+Number(item.owner_rating).toFixed(1)+' owner rating · '+Number(item.rating_count||0)+' review(s)</div>')+'</div><div class="cf"><div class="price">' + money(item.price) + ' <small>/ day</small></div></div>' +
     '<div class="card-actions">' + (item.sample ? '<button class="btn pri" type="button" data-list="1">List real gear</button>' : state.user?.id === item.owner ? '<button class="btn" type="button" disabled>Your listing</button>' :
     '<button class="btn pri" type="button" data-request="' + item.id + '">Request to borrow</button>') + '</div></article>').join('') :
     '<div class="empty"><h3>' + (state.loading ? 'Loading gear' : 'No gear found') + '</h3><p>' +
@@ -66,6 +66,7 @@ function render() {
   state.selected = selected?.id ?? null;
   $('detail').innerHTML = selected ? art(selected) + '<div class="dd"><h2>' + escapeHtml(selected.title) + '</h2>' +
     '<div class="price">' + money(selected.price) + ' <small>/ day</small></div><p>' + escapeHtml(selected.description) + '</p>' +
+    (selected.owner_rating==null?'':'<div class="owner-rating">★ '+Number(selected.owner_rating).toFixed(1)+' owner rating · '+Number(selected.rating_count||0)+' review(s)</div>')+
     '<div class="owner"><div class="av">' + escapeHtml(selected.name?.slice(0,1).toUpperCase() || '?') +
     '</div><div><b>' + escapeHtml(selected.name || 'Neighbour') + '</b><small>Local owner</small></div></div>' +
     '<dl><dt>Pickup</dt><dd>' + escapeHtml(selected.area) + '</dd><dt>Distance</dt><dd>' +
@@ -82,6 +83,7 @@ window.addEventListener('message', event => {
   if (event.origin !== location.origin || event.source !== parent || event.data?.source !== 'neighbourlink-app') return;
   const data = event.data;
   state.items = data.items || [];
+  state.filtered=Boolean(data.filtered);
   state.activity = data.activity || {saved:[],threads:[],listings:[]};
   state.saved = state.activity.saved || [];
   state.user = data.user || null;
@@ -105,7 +107,7 @@ document.addEventListener('click', event => {
   if (navigation) { event.preventDefault(); send('navigate',navigation.getAttribute('href').slice(2)); return; }
   const target = event.target.closest('[data-category],[data-item],[data-save],[data-request],[data-report],[data-list],[data-thread],[data-remove],[data-login],[data-logout],#list-item,#use-location');
   if (!target) return;
-  if (target.dataset.category) state.category = target.dataset.category;
+  if (target.dataset.category) { state.category = target.dataset.category; sendFilters(); }
   else if (target.dataset.save) { send('save',Number(target.dataset.save)); event.stopPropagation(); return; }
   else if (target.dataset.request) { send('request',Number(target.dataset.request)); event.stopPropagation(); return; }
   else if (target.dataset.report) { send('report',Number(target.dataset.report)); return; }
@@ -127,8 +129,23 @@ document.addEventListener('keydown', event => {
   if (event.key === 'Enter' && event.target.dataset?.item) { state.selected = Number(event.target.dataset.item); render(); }
 });
 $('q').addEventListener('input',event => { state.query = event.target.value.trim().toLowerCase(); render(); });
-$('range').addEventListener('change',event => { state.radius = Number(event.target.value); render(); });
-$('sort').addEventListener('change',event => { state.sort = event.target.value; render(); });
+$('range').addEventListener('change',event => { state.radius = Number(event.target.value); render(); sendFilters(); });
+$('sort').addEventListener('change',event => { state.sort = event.target.value; render(); sendFilters(); });
+function sendFilters() {
+  const startDate=$('start-date').value,endDate=$('end-date').value;
+  const hint=$('filter-hint');
+  if(Boolean(startDate)!==Boolean(endDate)) {hint.textContent='Choose both dates to filter availability.';return;}
+  hint.textContent='';
+  const selected=({tools:'Tools',tech:'Tech & Camera',outdoors:'Outdoors'})[state.category]||'all';
+  send('filters',state.portal==='services'?'services':'rentals',{
+    category:selected==='all'?'':selected,
+    minPrice:$('min-price').value,maxPrice:$('max-price').value,
+    startDate,endDate,
+    minRating:$('min-rating').value,radius:state.radius,
+    sort:state.sort==='near'?'nearest':state.sort
+  });
+}
+$('apply-filters').addEventListener('click',sendFilters);
 try { document.documentElement.dataset.theme = localStorage.getItem('nl-theme') || 'light'; } catch {}
 $('theme').addEventListener('click',() => {
   const theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';

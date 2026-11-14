@@ -6,7 +6,8 @@
 - **Phase 1 — Identity and trust: implemented locally.** SMS OTP delivery has a Twilio adapter and test mock; phone verification is required to finish signup. Manual KYC review stores app-encrypted ID/selfie images, exposes them only to the configured admin, and audits access and decisions. Trust scores use completed rentals and ratings received as an owner; new renters are capped by a settings-driven gear item-value tier. External KYC providers and mutual renter reviews remain future work.
 - **Phase 2 — Protected rental flow: implemented locally.** Gear listings now require a condition checklist. Deposit quotes apply settings-backed item-value, category, renter-trust and duration multipliers, clamp to configured bounds, and constrain owner overrides. The booking flow uses requested/accepted/paid/active/returned/claim_window/completed/disputed/resolved plus declined/cancelled states, two-sided private evidence, verified test-mode Razorpay order checkout/webhooks, append-only money events, post-payment contacts, mutual reviews, a free-cancel cutoff, automatic late-fee payout from the deposit, and no-claim deposit release/refund. Automated tests cover the SQLite path. Razorpay TEST credentials, Route product approval, activated seller linked accounts and provider dashboard/webhook verification remain external setup gates; no real-money or live-key path is enabled.
 - **Phase 3 — Disputes and administration: implemented locally.** Owner claims require a private supporting photo; the renter can submit one response. The admin claim file brings together claim, return/handover photos, messages, booking status history and claim audit history. Admins can resolve a deposit with full renter refund, bounded partial owner deduction, or full deposit release to the owner. Settlement actions are serialized, retry the saved decision, and append every money event. Admin-only dashboards cover members/KYC, listings, claims, ledger, commission, loss/dispute/repeat rates. SQLite integration tests cover permissions and all three outcomes. Live Razorpay resolution and Supabase migration still require external end-to-end verification.
-- Phase 4 is next; Phase 5 follows.
+- **Phase 4 — Marketplace usability: implemented locally.** Owners can manage date blocks; Gear and Hire search support category, price, date availability, rating, distance (when a location is shared), and sorting; sellers see ledger-based earnings, held amounts, and clearly marked release estimates. Transactional mail uses an idempotent retryable outbox. Terms, privacy, cancellation/refund, and banned-item pages are available as lawyer-review drafts. SQLite integration tests cover the new endpoints and behaviors.
+- **Phase 5 — Business accounts and revenue: implemented locally for the supplied visible checklist.** Shop creation, verified business-document review, owner/manager/staff permissions, stock quantities, listing duplication/drafts, and shop reports are covered by API/UI work and permission/state tests. Community and paid Neighbourhood Plus subscriptions use the Razorpay TEST adapter, signed webhooks, cancellation, idempotent subscription events, and append-only charge ledger entries. Price/limits remain placeholders. The supplied checklist ended at “Subscription plans”; any bullets after that were not present.
 - The supplied Phase 5 text is incomplete; it ends at “Subscription plans.”
 
 ## Starting architecture (before implementation)
@@ -46,14 +47,16 @@ Implemented locally as described above. Phase 3 adds renter responses, claim pho
 
 ### Phase 4 — Marketplace usability
 
-1. Owners cannot block calendar dates; search has no complete category/distance/price/date/rating filter and sort set.
-2. Seller view is limited to listings and requests; it has no earnings or payout summary.
-3. There is no notification adapter, transactional email, or terms/privacy/cancellation/banned-items pages.
+1. Availability blocks and date-aware search are implemented. Search supports category, price, dates, approximate distance, owner rating, and nearest/price/rating sorting, with location required only for distance filtering.
+2. Seller dashboard reports listing and booking counts, ledger-based released amounts, amounts still held, and estimated release dates; estimates are not represented as guaranteed bank payouts.
+3. Transactional email uses the configured provider-neutral outbox with idempotency and retries. Terms, privacy, cancellation/refund, and banned-items pages are marked as drafts for legal review.
+4. Future work includes push/SMS/WhatsApp notification adapters, automatic owner payout reconciliation, and a production-grade location index for larger catalogs.
 
 ### Phase 5 — Business accounts and revenue
 
-1. There are no shop accounts, business verification, staff roles, multi-quantity inventory, duplicate listing, drafts, or shop reports.
-2. The supplied brief ends at “Subscription plans”; the remaining Phase 5 requirements were not included. The visible Phase 5 requirements will be planned now, and the missing remainder should be appended when available.
+1. Shop accounts, manual business-document review, owner/manager/staff permissions with invitee acceptance, multi-quantity stock, duplicate-as-draft, draft/publish workflow, and inventory/booking reports are implemented. Business documents use the configured encryption key, admin-only reads, and access/decision audit; invitations and staff membership changes are append-only audited.
+2. Community and paid Neighbourhood Plus plans are implemented with placeholder entitlements. Paid billing is behind the Razorpay TEST adapter and requires a provider TEST plan ID, TEST credentials, and signed subscription webhooks. Captured charges enter the append-only ledger; owner cancellation is routed through the adapter.
+3. The supplied Phase 5 brief ended at “Subscription plans.” No later bullets were provided, so additional requirements cannot be claimed as complete.
 
 ## Implementation order
 
@@ -93,11 +96,15 @@ Work in phase-sized, reviewable commits. After each phase: run `npm test`, resol
 2. Add a seller dashboard based on ledger/provider data for earnings and next payout, plus listings and bookings.
 3. Add provider-neutral transactional notifications (email first; push/SMS/WhatsApp adapters later) and draft terms, privacy, cancellation/refund, and banned-items pages marked for lawyer review.
 
+**Status:** Implemented locally. `npm test` covers availability authorization/conflicts, date-filtered search, radius sorting, seller dashboard access, email delivery, and policy routes. A live Supabase migration and production email delivery still need external end-to-end checks.
+
 ### 5. Business accounts and revenue
 
 1. Add shop accounts, business verification, staff roles/permissions, multi-quantity inventory, duplicate listing, drafts, and basic reports.
 2. Add subscription-plan entitlements and billing through the configured payment provider, with ledger entries, webhook idempotency, cancellation, and tests.
 3. Incorporate the rest of Phase 5 when the missing brief text is supplied.
+
+**Status:** Implemented locally for the visible checklist. `npm test` covers shop creation, role authorization, encrypted document access, business review, listing drafts/publishing/duplication, multi-unit overlapping bookings, plan checkout, signed webhook idempotency, and subscription charge ledger entries. Real provider TEST checkout, Supabase migration, email delivery, and production hosting remain external end-to-end checks.
 
 ## Constraints and release gates
 

@@ -3,6 +3,9 @@ const empty = text => '<div class="empty">' + text + '</div>';
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
 }[char]));
+function safeRazorpayUrl(value) {
+  try {const url=new URL(value);return url.protocol==='https:'&&['rzp.io','checkout.razorpay.com'].includes(url.hostname)?url.href:'';} catch {return '';}
+}
 const categories = { gear: ['Tools','Tech & Camera','Outdoors'], help: ['Home repair','Creative','Lessons'] };
 const groups = { Tools:'tools', 'Tech & Camera':'tech', Outdoors:'outdoors', 'Home repair':'home', Creative:'creative', Lessons:'lessons' };
 const filters = { home:'all', rentals:'all', services:'all' };
@@ -30,6 +33,16 @@ let visitorArea = '';
 let activeMessages = [];
 let listingLocation = null;
 let radius = 10;
+const portalFilters={gear:null,help:null};
+const portalResults={gear:null,help:null};
+function portalSearchUrl(kind,filters) {
+  if (!filters) return '/listings';
+  const params=new URLSearchParams({kind,sort:filters.sort||'newest'});
+  for (const key of ['category','minPrice','maxPrice','startDate','endDate','minRating']) if (filters[key]) params.set(key,filters[key]);
+  const currentRadius=Number(filters.radius||radius);
+  if (visitorLocation) {params.set('latitude',visitorLocation.latitude);params.set('longitude',visitorLocation.longitude);params.set('radius',String(currentRadius));}
+  return '/listings?'+params.toString();
+}
 function kilometres(item) {
   if (!visitorLocation || item.latitude == null || item.longitude == null) return null;
   const radians = value => value * Math.PI / 180;
@@ -273,6 +286,12 @@ $('#forgot-password').onclick = () => {
   $('#reset-request-form').elements.email.value=auth.querySelector('[name="email"]').value;
   navigate('reset');
 };
+async function acceptShopInviteFromLink() {
+  const url=new URL(location.href),inviteId=url.searchParams.get('shopInvite');if(!inviteId)return;
+  try {await api('/shop-invitations/'+encodeURIComponent(inviteId)+'/accept','POST',{});toast('Shop invitation accepted.');}
+  catch(error) {toast(error.message);}
+  url.searchParams.delete('shopInvite');history.replaceState(null,'',url.pathname+url.search+url.hash);
+}
 submit(auth, async form => {
   await api('/' + auth.dataset.mode, 'POST', Object.fromEntries(form));
   user = await api('/session');
@@ -289,6 +308,7 @@ submit(auth, async form => {
   const destination = signInReturn;
   auth.querySelector('form').reset();
   await refresh();
+  await acceptShopInviteFromLink();
   const next = afterSignIn;
   afterSignIn = undefined;
   await navigate(destination);
@@ -327,6 +347,7 @@ profileForm.addEventListener('submit',event => {
       }
       activateProtectedFrames();
       await refresh();
+      await acceptShopInviteFromLink();
       await navigate('landing');
     } catch(error) { $('#profile-error').textContent = error.message; }
     finally { button.disabled = false; }
@@ -344,6 +365,7 @@ phoneOtpForm.addEventListener('submit',event=>{
       if (!user.profileComplete) throw Error('Your profile is still incomplete.');
       activateProtectedFrames();
       await refresh();
+      await acceptShopInviteFromLink();
       await navigate('landing');
     } catch(error) { $('#phone-otp-error').textContent=error.message; }
     finally { button.disabled=false; }
@@ -445,6 +467,18 @@ depositOverrideField.id='deposit-override-field';
 depositOverrideField.className='field';
 depositOverrideField.innerHTML='<label for="deposit-override">Preferred deposit (₹, optional)</label><input id="deposit-override" name="depositOverride" type="number" min="1" max="10000000" step="1" placeholder="Calculated automatically"><small>The final amount is risk-adjusted and limited by marketplace settings.</small>';
 conditionField.after(depositOverrideField);
+const inventoryField=document.createElement('div');
+inventoryField.className='field';
+inventoryField.innerHTML='<label for="listing-quantity">Available units</label><input id="listing-quantity" name="quantity" type="number" min="1" max="20" value="1" required><small>Personal listings have one unit. Shop plan limits apply to multi-unit stock.</small>';
+depositOverrideField.after(inventoryField);
+const shopField=document.createElement('div');
+shopField.className='field';
+shopField.innerHTML='<label for="listing-shop">Shop account (optional)</label><select id="listing-shop" name="shopId"><option value="">Personal listing</option></select>';
+inventoryField.after(shopField);
+const listingStatusField=document.createElement('div');
+listingStatusField.className='field';
+listingStatusField.innerHTML='<label for="listing-status">Save as</label><select id="listing-status" name="status"><option value="published">Publish listing</option><option value="draft">Save draft</option></select>';
+shopField.after(listingStatusField);
 $('#listing-location').onclick = () => perform(async () => {
   listingLocation = await locate();
   $('#listing-location-status').textContent = 'Approximate location added.';
@@ -471,10 +505,12 @@ listing.querySelector('[name="kind"]').onchange = changeCategories;
 function openListing(kind) {
   listingLocation = null;
   $('#listing-location-status').textContent = 'Optional. Your approximate location will be public.';
-  return requireUser(() => {
+  return requireUser(async () => {
     const form = listing.querySelector('form');
     form.reset();
     form.elements.kind.value = kind;
+    const shops=await api('/shops').catch(()=>[]),select=form.elements.shopId;
+    select.replaceChildren(new Option('Personal listing',''),...shops.map(shop=>new Option(shop.name+' · '+shop.role,shop.id)));
     changeCategories();
     show(listing);
   });
@@ -492,6 +528,7 @@ submit(listing, async form => {
   if (listingLocation) Object.assign(body,listingLocation);
   if (!file.size) throw Error('Choose a photo of the item or your work.');
   if (file.size > 1000000 || !['image/jpeg','image/png','image/webp'].includes(file.type)) throw Error('Choose a JPEG, PNG, or WebP photo under 1 MB.');
+  body.quantity=Number(body.quantity);if(!body.shopId)delete body.shopId;
   body.photoUploadId=await uploadImage(file,'listing');
   delete body.photo;
   await api('/listings','POST',body);
@@ -501,7 +538,7 @@ submit(listing, async form => {
   filters[target] = 'all';
   await refresh();
   navigate(target);
-  toast('Listing published.');
+  toast(body.status==='draft'?'Listing saved as a draft.':'Listing published.');
 });
 submit(report, async form => {
   await api('/reports/' + reportedId,'POST',{reason:form.get('reason')});
@@ -518,12 +555,13 @@ function card(item) {
     (item.hasPhoto ? '<img class="nl-photo" loading="lazy" src="/photos/' + item.id + '" alt="' + escape(item.title) + '">' : '<span class="nl-no-photo">No photo uploaded</span>') +
     '<span class="tag">' + escape(item.category) + '</span><button class="heart" aria-label="' + (saved ? 'Remove from saved' : 'Save listing') + '" aria-pressed="' + saved + '" data-save="' + item.id + '">' + (saved ? '♥' : '♡') + '</button></div>' +
     '<div class="card-body"><h3>' + escape(item.title) + '</h3><div class="meta">⌖ ' + escape(item.area) + '</div><p class="nl-description">' + escape(item.description) + '</p>'+conditionText+'<div class="owner">' + escape(item.name) + '</div></div>' +
-    '<div class="card-foot"><div class="price"><strong>₹' + item.price.toLocaleString('en-IN') + '</strong> ' + (item.kind === 'gear' ? '/ DAY' : '/ JOB') + (item.kind==='gear'&&item.item_value_minor!=null?'<small class="item-value">Item value ₹'+Math.floor(item.item_value_minor/100).toLocaleString('en-IN')+'</small>':'') + '</div>' +
+    '<div class="card-foot"><div class="price"><strong>₹' + item.price.toLocaleString('en-IN') + '</strong> ' + (item.kind === 'gear' ? '/ DAY' : '/ JOB') + (Number(item.quantity_available)>1?'<small class="item-value">'+Number(item.quantity_available)+' units available</small>':'') + (item.kind==='gear'&&item.item_value_minor!=null?'<small class="item-value">Item value ₹'+Math.floor(item.item_value_minor/100).toLocaleString('en-IN')+'</small>':'') + '</div>' +
     (item.owner === user?.id ? '' : '<button data-request="' + item.id + '">REQUEST →</button>') +
     '</div><button class="btn" data-report="' + item.id + '">Report</button></article>';
 }
 function render() {
-  const available = [...items, ...examples.filter(example => !items.some(item => item.kind === example.kind))];
+  const currentItems=view==='services'&&portalResults.help?portalResults.help:view==='rentals'&&portalResults.gear?portalResults.gear:items;
+  const available = [...currentItems, ...examples.filter(example => !currentItems.some(item => item.kind === example.kind))];
   let matches = available.filter(item => [item.title,item.category,item.area,item.name,item.description].some(text => text?.toLowerCase().includes(query)));
   if (visitorLocation) {
     matches = matches.filter(item => kilometres(item) != null && kilometres(item) <= radius);
@@ -548,7 +586,8 @@ function updateBorrow() {
   const frame = $('.borrow-frame');
   let theme = 'light';
   try { theme = localStorage.getItem('nl-theme') || 'light'; } catch {}
-  frame?.contentWindow?.postMessage({source:'neighbourlink-app',items,activity,user,location:visitorLocation,area:visitorArea,view,threadId,messages:activeMessages,theme},location.origin);
+  const gearItems=portalResults.gear||items;
+  frame?.contentWindow?.postMessage({source:'neighbourlink-app',items:gearItems,filtered:Boolean(portalFilters.gear),activity,user,location:visitorLocation,area:visitorArea,view,threadId,messages:activeMessages,theme},location.origin);
 }
 $('.borrow-frame').addEventListener('load',updateBorrow);
 window.addEventListener('message',event => {
@@ -556,6 +595,12 @@ window.addEventListener('message',event => {
   const {action,id} = event.data;
   perform(async () => {
     if (action === 'ready') return updateBorrow();
+    if (action === 'filters') {
+      const kind=id==='services'?'help':'gear',incoming=event.data.filters||{};
+      portalFilters[kind]={kind,...incoming};
+      portalResults[kind]=await api(portalSearchUrl(kind,portalFilters[kind]));
+      render();return;
+    }
     if (action === 'login') { const destination = view; return requireUser(() => navigate(destination)); }
     if (action === 'navigate') {
       if (['saved','messages'].includes(id) && !user) return requireUser(() => navigate(id));
@@ -610,11 +655,56 @@ window.addEventListener('message',event => {
 });
 function renderActivity() {
   $('#activity').innerHTML = user ? '<div class="nl-controls"><strong>' + escape(user.name) + '</strong><button class="btn" data-logout>Sign out</button></div><h2>Your listings</h2>' +
-    (activity.listings.map(item => '<div class="nl-record">' + escape(item.title) + (item.active ? ' <button class="btn" data-remove="' + item.id + '">Unpublish</button>' : ' · Unpublished') + '</div>').join('') || '<p>No listings yet.</p>') +
+    (activity.listings.map(item => '<article class="seller-listing" data-calendar-listing="'+item.id+'"><div class="nl-controls"><strong>' + escape(item.title) + '</strong><span>'+escape(item.listing_status|| (item.active?'published':'draft'))+' · '+Number(item.quantity_available||1)+' unit(s)</span>' + (item.active ? '<button class="btn" data-remove="' + item.id + '">Unpublish</button>' : '<button class="btn primary" data-publish="'+item.id+'">Publish</button>') + '<button class="btn" data-duplicate="'+item.id+'">Duplicate as draft</button></div>'+(item.kind==='gear'?'<details><summary>Manage availability dates</summary><form class="availability-form"><label class="auth-field">Block from<input name="startDate" type="date" required></label><label class="auth-field">Through<input name="endDate" type="date" required></label><button type="button" class="btn primary" data-block-dates="'+item.id+'">Block these dates</button></form><div class="availability-list">Loading dates…</div></details>':'')+'</article>').join('') || '<p>No listings yet.</p>') +
+    '<section class="seller-center" id="seller-center"><h2>Seller summary</h2><p>Loading earnings and release estimates…</p></section><section class="seller-center" id="shop-center"><h2>Shop accounts</h2><p>Loading business tools…</p></section>'+
+    (user.admin?'<section class="seller-center" id="shop-review-queue"><h2>Business verification queue</h2><p>Loading submissions…</p></section>':'')+
     (user.admin ? '<h2>Open reports</h2>' + (activity.reports.map(item => '<div class="nl-record"><strong>' + escape(item.title) + '</strong><p>' + escape(item.reason) + '</p><button class="btn" data-moderate="' + item.id + '" data-status="removed">Remove listing</button> <button class="btn" data-moderate="' + item.id + '" data-status="dismissed">Dismiss</button></div>').join('') || '<p>No open reports.</p>') : '') :
     '<button class="btn primary" data-signin>Sign in</button>';
   $('.threads').innerHTML = activity.threads.map(thread => '<button class="thread nl-thread' + (thread.id === threadId ? ' active' : '') + '" data-thread="' + thread.id + '"><b>' + escape(thread.title) + '</b><small>' + escape(thread.status) + ' · ' + escape(thread.owner === user?.id ? thread.requesterName : thread.ownerName) + '</small></button>').join('') || empty(user ? 'No requests yet.' : 'Sign in to see your requests.');
-  if (user) loadKycCenter();
+  if (user) {
+    const policyLinks=document.createElement('nav');policyLinks.className='account-policy-links';policyLinks.setAttribute('aria-label','Policies');policyLinks.innerHTML='<a href="/terms">Terms draft</a><a href="/privacy">Privacy draft</a><a href="/cancellation-refunds">Cancellation and refund draft</a><a href="/banned-items">Banned items draft</a>';$('#activity').append(policyLinks);
+    loadSellerCenter();loadAvailability();loadKycCenter();loadShopCenter();if(user.admin)loadAdminShopQueue();
+  }
+}
+async function loadSellerCenter() {
+  const root=$('#seller-center');if(!root||!user)return;
+  try {
+    const data=await api('/seller/dashboard');if(!root.isConnected)return;
+    const money=value=>'₹'+(Number(value||0)/100).toLocaleString('en-IN',{maximumFractionDigits:2});
+    root.innerHTML='<h2>Seller summary</h2><div class="seller-metrics"><article><strong>'+data.listings.active+'</strong><span>Active listings</span></article><article><strong>'+data.bookings.completed+'</strong><span>Completed rentals</span></article><article><strong>'+money(data.releasedThroughProviderMinor)+'</strong><span>Released to Razorpay settlement</span></article><article><strong>'+money(data.heldWithProvider.rentalMinor)+'</strong><span>Rental amount currently held</span></article><article><strong>'+money(data.heldWithProvider.refundableDepositMinor)+'</strong><span>Refundable deposits currently held</span></article></div><h3>Estimated upcoming releases</h3>'+(data.upcoming.map(row=>'<div class="nl-record"><strong>'+escape(row.title)+'</strong><p>'+escape(row.status)+' · expected after return and claim window: '+escape(row.estimated_release_at?new Date(row.estimated_release_at).toLocaleString():'date not set')+'</p><p>Estimated rental release '+money(row.rental_release_minor)+' · refundable deposit '+money(row.refundable_deposit_minor)+' (not seller earnings)</p></div>').join('')||'<p>No provider-held rental transfers.</p>')+'<p>Release estimates are based on booking dates and claim settings. Razorpay controls bank settlement timing; these figures are not a bank payout promise.</p>';
+  } catch(error) {if(root.isConnected)root.innerHTML='<h2>Seller summary</h2><p role="alert">Could not load seller information: '+escape(error.message)+'</p>';}
+}
+async function loadShopCenter() {
+  const root=$('#shop-center');if(!root||!user)return;
+  try {
+    const [shopList,plans,pendingInvites]=await Promise.all([api('/shops'),api('/shops/plans'),api('/shop-invitations')]);
+    const shops=await Promise.all(shopList.map(shop=>api('/shops/'+shop.id)));if(!root.isConnected)return;
+    root.innerHTML='<h2>Shop accounts</h2><p>Run several listings with team access, stock counts and simple reports.</p>'+ (pendingInvites.length?'<div class="shop-invitation-inbox"><h3>Shop invitations</h3>'+pendingInvites.map(invite=>'<div class="nl-record"><strong>'+escape(invite.shop_name)+'</strong><p>'+escape(invite.inviter_name)+' invited you as '+escape(invite.role)+' · expires '+escape(invite.expires_at)+'</p><button class="btn primary" data-accept-shop-invite="'+escape(invite.id)+'">Accept invitation</button></div>').join('')+'</div>':'')+'<form id="shop-create-form" class="nl-controls"><label class="auth-field">Shop name<input name="name" maxlength="100" required></label><label class="auth-field">Business type<select name="businessType"><option value="sole_proprietor">Sole proprietor</option><option value="partnership">Partnership</option><option value="private_limited">Private limited</option><option value="cooperative">Cooperative</option><option value="other">Other</option></select></label><label class="auth-field">Registration reference (optional)<input name="registrationReference" maxlength="80"></label><button class="btn primary">Create shop</button></form>'+
+      (shops.map(shop=>'<article class="shop-card"><div class="nl-controls"><h3>'+escape(shop.name)+'</h3><span>Business review: '+escape(shop.verification_status)+'</span><span>Plan: '+escape(shop.plan_key||'community')+' · '+escape(shop.subscription_status||'active')+'</span></div>'+
+        '<details><summary>Business verification</summary><p>Upload a registration document for private, encrypted admin review. This is separate from personal identity verification.</p>'+(shop.role==='owner'?'<form class="shop-verification-form" data-shop="'+escape(shop.id)+'"><label class="auth-field">Business registration document<input name="document" type="file" accept="image/jpeg,image/png,image/webp" required></label><button class="btn primary">Submit for review</button></form>':'<p>Only the shop owner can submit verification documents.</p>')+'</details>'+
+        '<details><summary>Team access · '+shop.members.length+' member(s)</summary>'+(shop.role==='owner'||shop.role==='manager'?'<form class="shop-member-form nl-controls" data-shop="'+escape(shop.id)+'"><label class="auth-field">Verified member email<input name="email" type="email" required></label><label class="auth-field">Role<select name="role">'+(shop.role==='owner'?'<option value="manager">Manager</option>':'')+'<option value="staff">Staff</option></select></label><button class="btn primary">Invite team member</button></form>':'')+'<ul>'+shop.members.map(member=>'<li>'+escape(member.name)+' · '+escape(member.email)+' · '+escape(member.role)+(shop.role==='owner'&&member.role!=='owner'?' <button class="btn" data-shop-remove="'+escape(shop.id)+'" data-member="'+member.user_id+'">Remove</button>':'')+'</li>').join('')+'</ul>'+(shop.pendingInvitations?.length?'<h4>Invitations awaiting acceptance</h4>'+shop.pendingInvitations.map(invite=>'<p>'+escape(invite.invitee_email)+' · '+escape(invite.role)+' · expires '+escape(invite.expires_at)+'</p>').join(''):'')+'</details>'+
+        '<details><summary>Plan and reports</summary><p>'+plans.map(plan=>'<span class="shop-plan"><strong>'+escape(plan.name)+'</strong> · '+(Number(plan.price_minor)?'₹'+(Number(plan.price_minor)/100).toLocaleString('en-IN')+'/month':'Free')+' · '+plan.max_active_listings+' active listings · '+plan.max_quantity_per_listing+' unit(s) per listing</span>').join('<br>')+'</p>'+(shop.role==='owner'?'<form class="shop-plan-form" data-shop="'+escape(shop.id)+'"><label class="auth-field">Choose a plan<select name="planKey">'+plans.map(plan=>'<option value="'+escape(plan.plan_key)+'" '+(shop.plan_key===plan.plan_key?'selected':'')+'>'+escape(plan.name)+'</option>').join('')+'</select></label><button class="btn primary">Update plan</button></form>':'')+(shop.subscription?.status==='pending_auth'&&safeRazorpayUrl(shop.subscription.checkout_url)?'<p><a class="btn primary" rel="noopener noreferrer" target="_blank" href="'+escape(safeRazorpayUrl(shop.subscription.checkout_url))+'">Continue secure subscription checkout</a></p>':'')+'<button class="btn" data-shop-report="'+escape(shop.id)+'">View shop report</button><pre class="shop-report" data-report="'+escape(shop.id)+'" hidden></pre></details>'+
+        '<div class="shop-inventory"><strong>Inventory</strong>'+((shop.inventory||[]).map(item=>'<p>'+escape(item.title)+' · '+escape(item.listing_status)+' · '+item.quantity_available+' unit(s)</p>').join('')||'<p>Use “Post a listing” and select this shop to add inventory.</p>')+'</div></article>').join('')||'<p>No shop yet. Create one to add team roles and multi-unit inventory.</p>');
+    $('#shop-create-form').onsubmit=event=>{event.preventDefault();const form=event.currentTarget;perform(async()=>{await api('/shops','POST',Object.fromEntries(new FormData(form)));await refresh();toast('Shop created.');});};
+    root.querySelectorAll('.shop-verification-form').forEach(form=>form.onsubmit=event=>{event.preventDefault();perform(async()=>{const file=form.elements.document.files[0];if(!file||file.size>1000000||!['image/jpeg','image/png','image/webp'].includes(file.type))throw Error('Choose a JPEG, PNG, or WebP document under 1 MB.');const uploadId=await uploadImage(file,'business-doc');await api('/shops/'+form.dataset.shop+'/verification','POST',{uploadId});await refresh();toast('Business document sent for encrypted review.');});});
+    root.querySelectorAll('.shop-member-form').forEach(form=>form.onsubmit=event=>{event.preventDefault();perform(async()=>{await api('/shops/'+form.dataset.shop+'/members','POST',Object.fromEntries(new FormData(form)));await refresh();toast('Invitation email sent. The role starts after they accept.');});});
+    root.querySelectorAll('.shop-plan-form').forEach(form=>form.onsubmit=event=>{event.preventDefault();perform(async()=>{const result=await api('/shops/'+form.dataset.shop+'/subscription','POST',{planKey:form.elements.planKey.value});await refresh();toast(result.status==='pending_auth'?'Subscription checkout is ready; use the secure checkout link in this shop.':'Community plan selected.');});});
+  } catch(error) {if(root.isConnected)root.innerHTML='<h2>Shop accounts</h2><p role="alert">'+escape(error.message)+'</p>';}
+}
+async function loadAdminShopQueue() {
+  const root=$('#shop-review-queue');if(!root||!user?.admin)return;
+  try {const shops=await api('/admin/shops');if(!root.isConnected)return;
+    root.innerHTML='<h2>Business verification queue</h2>'+(shops.map(shop=>'<article class="nl-record"><h3>'+escape(shop.name)+'</h3><p>'+escape(shop.business_type)+' · '+escape(shop.owner_name)+' · '+escape(shop.owner_email)+'</p><p>Status: '+escape(shop.verification_status)+(shop.registration_reference?' · Reference: '+escape(shop.registration_reference):'')+'</p>'+(shop.submitted_at?'<p>Submitted '+escape(shop.submitted_at)+'</p>':'')+(shop.verification_status==='pending'?'<img class="business-review-photo" src="/api/v1/admin/shops/'+escape(shop.id)+'/document" alt="Encrypted business document for '+escape(shop.name)+'">':'')+'<label class="auth-field">Review reason<input data-business-reason="'+escape(shop.id)+'" maxlength="500"></label><div class="nl-controls"><button class="btn primary" data-business-status="verified" data-shop="'+escape(shop.id)+'">Verify business</button><button class="btn" data-business-status="suspended" data-shop="'+escape(shop.id)+'">Suspend business</button></div></article>').join('')||'<p>No business submissions yet.</p>');
+  } catch(error) {if(root.isConnected)root.innerHTML='<h2>Business verification queue</h2><p role="alert">'+escape(error.message)+'</p>';}
+}
+async function loadAvailability() {
+  const rows=activity.listings.filter(item=>item.kind==='gear');
+  await Promise.all(rows.map(async item=>{
+    const root=document.querySelector('[data-calendar-listing="'+item.id+'"] .availability-list');if(!root)return;
+    try {const blocks=await api('/listings/'+item.id+'/availability');if(!root.isConnected)return;
+      root.innerHTML=blocks.map(block=>'<div class="nl-record"><strong>'+escape(block.start_date)+' to '+escape(block.end_date)+'</strong> · '+(block.source==='owner_block'?'Owner blocked':'Rental booking')+(block.source==='owner_block'?' <button class="btn" data-unblock="'+item.id+'" data-block-id="'+escape(block.id||'')+'">Remove block</button>':'')+'</div>').join('')||'<p>No dates blocked.</p>';
+    } catch(error) {root.textContent='Availability could not be loaded: '+error.message;}
+  }));
 }
 async function loadKycCenter() {
   const activityRoot=$('#activity');
@@ -684,9 +774,12 @@ async function loadAdminConsole(center) {
   } catch(error) { if(root.isConnected) root.innerHTML='<h2>Marketplace operations</h2><p role="alert">Admin data could not be loaded: '+escape(error.message)+'</p>'; }
 }
 async function refresh() {
-  [items,activity] = await Promise.all([
-    api('/listings'), user ? api('/activity') : Promise.resolve({saved:[],threads:[],listings:[],reports:[]})
+  const [allListings,currentActivity,gearResults,helpResults] = await Promise.all([
+    api('/listings'), user ? api('/activity') : Promise.resolve({saved:[],threads:[],listings:[],reports:[]}),
+    portalFilters.gear?api(portalSearchUrl('gear',portalFilters.gear)):Promise.resolve(null),
+    portalFilters.help?api(portalSearchUrl('help',portalFilters.help)):Promise.resolve(null)
   ]);
+  items=allListings;activity=currentActivity;portalResults.gear=gearResults;portalResults.help=helpResults;
   render();
 }
 function navigate(next, updateHash = true) {
@@ -696,8 +789,9 @@ function navigate(next, updateHash = true) {
   if (next === 'home') next = 'rentals';
   if (!views.includes(next)) next = 'landing';
   view = next;
-  const currentToken=new URLSearchParams(location.search).get('token');
-  const route = next === 'landing' ? '/' : next === 'login' ? '/login' : next === 'profile' ? '/profile' : next === 'verify' ? '/verify-email' + (currentToken ? '?token=' + encodeURIComponent(currentToken) : '') : next === 'reset' ? '/reset-password' + (currentToken ? '?token=' + encodeURIComponent(currentToken) : '') : '/#' + next;
+  const currentToken=new URLSearchParams(location.search).get('token'),shopInvite=new URLSearchParams(location.search).get('shopInvite');
+  let route = next === 'landing' ? '/' : next === 'login' ? '/login' : next === 'profile' ? '/profile' : next === 'verify' ? '/verify-email' + (currentToken ? '?token=' + encodeURIComponent(currentToken) : '') : next === 'reset' ? '/reset-password' + (currentToken ? '?token=' + encodeURIComponent(currentToken) : '') : '/#' + next;
+  if(shopInvite) route+=(route.includes('?')?'&':'?')+'shopInvite='+encodeURIComponent(shopInvite);
   if (updateHash && location.pathname + location.hash !== route) history.pushState(null,'',route);
   document.body.classList.toggle('nl-login',['login','profile','verify','reset'].includes(next));
   if (next === 'login') {
@@ -948,6 +1042,21 @@ document.addEventListener('click', event => perform(async () => {
     await api('/reports/' + data.moderate,'PATCH',{status:data.status});
     return refresh();
   }
+  if (data.blockDates) {
+    const booking=data.blockDates,form=document.querySelector('[data-calendar-listing="'+booking+'"] .availability-form');
+    await api('/listings/'+booking+'/availability','POST',{startDate:form.elements.startDate.value,endDate:form.elements.endDate.value});
+    await refresh();return toast('Those dates are now blocked for your listing.');
+  }
+  if(data.publish) {await api('/listings/'+data.publish+'/status','PATCH',{status:'published'});await refresh();return toast('Draft published.');}
+  if(data.duplicate) {await api('/listings/'+data.duplicate+'/duplicate','POST',{});await refresh();return toast('A draft copy was created.');}
+  if(data.shopRemove&&confirm('Remove this member from the shop?')) {await api('/shops/'+data.shopRemove+'/members/'+data.member,'DELETE');await refresh();return toast('Shop access removed.');}
+  if(data.shopReport) {const report=await api('/shops/'+data.shopReport+'/reports');const output=document.querySelector('[data-report="'+data.shopReport+'"]');if(output){output.hidden=false;output.textContent=JSON.stringify(report,null,2);}return;}
+  if(data.acceptShopInvite) {await api('/shop-invitations/'+data.acceptShopInvite+'/accept','POST',{});await refresh();return toast('You joined the shop team.');}
+  if(data.businessStatus&&data.shop) {const reason=document.querySelector('[data-business-reason="'+data.shop+'"]')?.value||'';await api('/admin/shops/'+data.shop+'/verification','PATCH',{status:data.businessStatus,reason});await refresh();return toast('Business review saved to the audit trail.');}
+  if (data.unblock&&data.blockId) {
+    await api('/listings/'+data.unblock+'/availability/'+data.blockId,'DELETE');
+    await refresh();return toast('Date block removed.');
+  }
   if (data.resolveClaim) {
     const booking=Number(data.resolveClaim),decision=$('[data-claim-decision="'+booking+'"]').value;
     const rupees=Number($('[data-claim-amount="'+booking+'"]').value||0);
@@ -981,9 +1090,16 @@ function search(value) {
 }
 $('#search-btn').onclick = () => search($('#global-search').value);
 $('#global-search').onkeydown = event => { if (event.key === 'Enter') $('#search-btn').click(); };
+async function applyPortalFilters(kind,controls) {
+  const fields={category:controls.querySelector('[data-filter-category]').value,minPrice:controls.querySelector('[data-filter-min]').value,maxPrice:controls.querySelector('[data-filter-max]').value,startDate:controls.querySelector('[data-filter-start]').value,endDate:controls.querySelector('[data-filter-end]').value,minRating:controls.querySelector('[data-filter-rating]').value,sort:controls.querySelector('[data-filter-sort]').value,radius};
+  portalFilters[kind]=fields;
+  portalResults[kind]=await api(portalSearchUrl(kind,fields));
+  render();
+}
 for (const name of ['home','services']) {
   const form = document.createElement('form');
   form.className = 'nl-controls';
+  form.dataset.portal=name==='services'?'help':'gear';
   form.setAttribute('role','search');
   form.innerHTML = '<input type="search" aria-label="Search by neighbourhood or listing" placeholder="Search by neighbourhood or listing"><button class="btn">Search</button>';
   form.onsubmit = event => { event.preventDefault(); search(form.querySelector('input').value); };
@@ -992,16 +1108,19 @@ for (const name of ['home','services']) {
   controls.innerHTML = '<button type="button" class="btn" data-nearby>Use my location</button>' +
     '<label>Within <select aria-label="Distance"><option value="5">5 km</option><option value="10" selected>10 km</option><option value="25">25 km</option></select></label>' +
     '<button type="button" class="btn" data-clear>Show all</button><span class="nearby-status" role="status"></span>';
+  const options=name==='services'?[['','All Help'],['Home repair','Home repair'],['Creative','Creative'],['Lessons','Lessons']]:[['','All Gear'],['Tools','Tools'],['Tech & Camera','Tech & Camera'],['Outdoors','Outdoors']];
+  controls.insertAdjacentHTML('beforeend','<details class="nl-market-filters"><summary>Filter price, dates and rating</summary><div><label>Category<select data-filter-category>'+options.map(([value,label])=>'<option value="'+value+'">'+label+'</option>').join('')+'</select></label><label>Min price · ₹<input data-filter-min type="number" min="0" max="10000000"></label><label>Max price · ₹<input data-filter-max type="number" min="0" max="10000000"></label><label>Available from<input data-filter-start type="date"></label><label>Available to<input data-filter-end type="date"></label><label>Owner rating<select data-filter-rating><option value="0">Any rating</option><option value="3">3+ stars</option><option value="4">4+ stars</option><option value="4.5">4.5+ stars</option></select></label><label>Sort by<select data-filter-sort><option value="newest">Newest</option><option value="nearest">Nearest</option><option value="price">Lowest price</option><option value="rating">Highest rated</option></select></label><button type="button" class="btn primary" data-filter-apply>Apply filters</button></div></details>');
   controls.querySelector('[data-nearby]').onclick = () => perform(async () => {
     visitorLocation = await locate();
-    render();
+    await refresh();
   });
   controls.querySelector('select').onchange = event => {
     radius = Number(event.target.value);
     document.querySelectorAll('select[aria-label="Distance"]').forEach(select => select.value = String(radius));
-    render();
+    if (portalFilters[form.dataset.portal]) perform(()=>applyPortalFilters(form.dataset.portal,controls)); else render();
   };
-  controls.querySelector('[data-clear]').onclick = () => { visitorLocation = null; render(); };
+  controls.querySelector('[data-filter-apply]').onclick=()=>perform(()=>applyPortalFilters(form.dataset.portal,controls));
+  controls.querySelector('[data-clear]').onclick = () => { visitorLocation = null; if (portalFilters[form.dataset.portal]) perform(()=>applyPortalFilters(form.dataset.portal,controls)); else render(); };
   form.append(controls);
   $('#view-' + name + (name === 'home' ? ' .hero' : ' .page-title')).after(form);
 }
@@ -1032,6 +1151,7 @@ perform(async () => {
     activateProtectedFrames();
     await navigate(requested === 'login' ? 'landing' : requested,requested === 'login');
     await refresh();
+    await acceptShopInviteFromLink();
     if (view === 'messages') await openThread(threadId);
   } finally { document.body.classList.remove('auth-loading'); }
 });

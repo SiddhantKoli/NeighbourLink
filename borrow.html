@@ -59,6 +59,14 @@ h1{margin:0;font-size:44px;line-height:.95;font-weight:700;letter-spacing:-.065e
 .chip[aria-pressed="true"]{background:var(--mint);color:var(--black)}
 .chip[aria-pressed="true"] em{color:var(--black)}
 .chips .gap{width:2px;background:var(--line);margin:4px 4px}
+.marketplace-filters{margin:-8px 0 22px;border:3px solid var(--line);background:var(--panel);box-shadow:4px 4px 0 var(--line)}
+.marketplace-filters summary{cursor:pointer;padding:11px 14px;font-weight:700}
+.marketplace-filters>div{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:12px;padding:12px;border-top:2px solid var(--line)}
+.marketplace-filters label{display:grid;gap:5px;font-size:14px;font-weight:700}
+.marketplace-filters input,.marketplace-filters select{width:100%;min-width:0;height:42px;padding:0 9px;background:var(--bg);border:2px solid var(--line)}
+.marketplace-filters .apply{grid-column:1/-1;justify-self:start}
+.filter-hint{margin:0;padding:0 12px 10px;min-height:20px;font-size:14px;font-weight:600;color:#8c3000}
+.owner-rating{font-size:14px;font-weight:700}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:26px}
 .card{position:relative;display:flex;flex-direction:column;background:var(--panel);border:3px solid var(--line);box-shadow:6px 6px 0 var(--line);cursor:pointer;transition:transform .1s,box-shadow .1s}
 .card:hover{transform:translate(-2px,-2px);box-shadow:8px 8px 0 var(--line)}
@@ -144,6 +152,7 @@ dt{color:var(--mute)}dd{margin:0;font-weight:500;text-align:right}
     <select class="sel" id="sort" aria-label="Sort"><option value="near">Sort: nearest</option><option value="price">Sort: lowest price</option></select>
    </div>
    <div class="chips" id="chips"></div>
+   <details class="marketplace-filters"><summary>Price, dates and owner rating</summary><div><label>Minimum price · ₹<input id="min-price" type="number" min="0" max="10000000" step="1"></label><label>Maximum price · ₹<input id="max-price" type="number" min="0" max="10000000" step="1"></label><label>Available from<input id="start-date" type="date"></label><label>Available through<input id="end-date" type="date"></label><label>Minimum owner rating<select id="min-rating"><option value="0">Any rating</option><option value="3">3 stars or higher</option><option value="4">4 stars or higher</option><option value="4.5">4.5 stars or higher</option></select></label><button class="btn pri apply" id="apply-filters" type="button">Apply filters</button></div><p id="filter-hint" class="filter-hint" aria-live="polite"></p></details>
    <div class="grid" id="grid"></div>
   </div>
  </section>

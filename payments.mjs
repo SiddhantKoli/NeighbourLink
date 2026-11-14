@@ -12,6 +12,7 @@ export function createPaymentAdapter() {
     if (process.env.NODE_ENV!=='test') throw new Error('The mock payment adapter is only available in tests.');
     const orders=new Map();
     const additionalTransfers=new Map();
+    const subscriptions=new Map();
     return {
       mode:'test-mock',keyId:'rzp_test_neighbourlink',
       async verifyLinkedAccount(accountId){return /^acc_test_[A-Za-z0-9_-]{1,60}$/.test(accountId)?{id:accountId,status:'activated'}:null;},
@@ -29,6 +30,12 @@ export function createPaymentAdapter() {
         if(!transfer){transfer={id:'trf_late_fee_'+booking,amount,on_hold:false,notes:{booking_id:String(booking),part:'late_fee'}};additionalTransfers.set(paymentId,[...rows,transfer]);}
         return transfer;
       },
+      async createShopSubscription({shopId,planKey,expectedAmountMinor}) {
+        const id='sub_test_'+shopId.replaceAll('-','').slice(0,18);
+        const subscription={id,status:'created',amount:expectedAmountMinor,short_url:'https://checkout.razorpay.com/v1/checkout.js?subscription_id='+id,notes:{shop_id:shopId,plan_key:planKey}};
+        subscriptions.set(id,subscription);return subscription;
+      },
+      async cancelShopSubscription(subscriptionId){const subscription=subscriptions.get(subscriptionId);if(!subscription)return {id:subscriptionId,status:'cancelled'};subscription.status='cancelled';return subscription;},
       async setHold(){return {status:'processed'};},
       async fetchTransfer(transferId){const booking=Number(transferId.match(/_(\d+)$/)?.[1]),row=orders.get('order_test_'+booking);return row?{id:transferId,amount:transferId.includes('deposit')?row.depositAmount:row.ownerAmount,amount_reversed:0,on_hold:true}:null;},
       async reverseTransfer(){return {status:'reversed'};},
@@ -40,6 +47,7 @@ export function createPaymentAdapter() {
   const keyId=process.env.RAZORPAY_KEY_ID || '';
   const keySecret=process.env.RAZORPAY_KEY_SECRET || '';
   const webhookSecret=process.env.RAZORPAY_WEBHOOK_SECRET || '';
+  const shopPlanId=process.env.RAZORPAY_SHOP_PLAN_ID || '';
   if (!keyId.startsWith('rzp_test_') || !keySecret || !webhookSecret) throw new Error('Razorpay must be configured with TEST keys and a webhook secret.');
   async function request(path,method='GET',body) {
     const response=await fetch('https://api.razorpay.com/v1'+path,{
@@ -65,6 +73,14 @@ export function createPaymentAdapter() {
           {account:ownerAccountId,amount:depositAmount,currency:'INR',on_hold:true,notes:{booking_id:String(booking),part:'deposit'}}
         ]});
     },
+    async createShopSubscription({shopId,planKey,expectedAmountMinor}) {
+      if(!/^plan_[A-Za-z0-9]+$/.test(shopPlanId)) throw Object.assign(new Error('Configure a Razorpay TEST subscription plan ID before enabling paid shop plans.'),{status:503});
+      const providerPlan=await request('/plans/'+encodeURIComponent(shopPlanId));
+      const actualAmount=Number(providerPlan.item?.amount??providerPlan.amount),currency=providerPlan.item?.currency??providerPlan.currency;
+      if(actualAmount!==expectedAmountMinor||currency!=='INR'||providerPlan.period!=='monthly'||Number(providerPlan.interval)!==1) throw Object.assign(new Error('The Razorpay TEST plan must match the configured monthly INR price. No checkout was created.'),{status:503});
+      return request('/subscriptions','POST',{plan_id:shopPlanId,total_count:120,customer_notify:1,notes:{shop_id:shopId,plan_key:planKey}});
+    },
+    cancelShopSubscription:subscriptionId=>request('/subscriptions/'+encodeURIComponent(subscriptionId)+'/cancel','POST',{cancel_at_cycle_end:0}),
     verifyCheckout:({orderId,paymentId,checkoutSignature})=>signature(createHmac('sha256',keySecret).update(orderId+'|'+paymentId).digest('hex'),checkoutSignature),
     verifyWebhook:(raw,provided)=>signature(createHmac('sha256',webhookSecret).update(raw).digest('hex'),provided),
     findPayment:paymentId=>request('/payments/'+encodeURIComponent(paymentId)),

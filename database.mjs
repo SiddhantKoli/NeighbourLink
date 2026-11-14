@@ -289,6 +289,124 @@ const migrations = [
         `);
       }
     }
+  },
+  {
+    version: 7,
+    name: 'listing availability and email notification queue',
+    async up(context) {
+      await context.exec(`
+        CREATE TABLE IF NOT EXISTS listing_availability_blocks(
+          id TEXT PRIMARY KEY, listing INTEGER NOT NULL, owner_user_id INTEGER NOT NULL,
+          start_date TEXT NOT NULL, end_date TEXT NOT NULL, created_at TEXT NOT NULL,
+          UNIQUE(listing,start_date,end_date)
+        );
+        CREATE INDEX IF NOT EXISTS listing_availability_dates ON listing_availability_blocks(listing,start_date,end_date);
+        CREATE TABLE IF NOT EXISTS notification_outbox(
+          id TEXT PRIMARY KEY, event_key TEXT NOT NULL UNIQUE, recipient_email TEXT NOT NULL,
+          subject TEXT NOT NULL, body TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+          attempts INTEGER NOT NULL DEFAULT 0, available_at TEXT NOT NULL, locked_at TEXT, last_error TEXT,
+          sent_at TEXT, created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS notification_outbox_due ON notification_outbox(status,available_at);
+      `);
+    }
+  },
+  {
+    version: 8,
+    name: 'shop accounts, inventory and subscriptions',
+    async up(context) {
+      if(context.dialect==='postgres') await context.exec('ALTER TABLE requests DROP CONSTRAINT IF EXISTS requests_no_overlap_lifecycle');
+      await context.addColumn('listings','shop_id','TEXT');
+      await context.addColumn('listings','quantity_available','INTEGER NOT NULL DEFAULT 1');
+      await context.addColumn('listings','listing_status',"TEXT NOT NULL DEFAULT 'published'");
+      await context.exec(`
+        CREATE TABLE IF NOT EXISTS business_accounts(
+          id TEXT PRIMARY KEY, owner_user_id INTEGER NOT NULL, name TEXT NOT NULL, business_type TEXT NOT NULL,
+          registration_reference TEXT NOT NULL DEFAULT '', verification_status TEXT NOT NULL DEFAULT 'unverified',
+          verification_document_key TEXT, verification_document_type TEXT, submitted_at TEXT, reviewed_at TEXT,
+          reviewer_user_id INTEGER, decision_reason TEXT, created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS business_accounts_owner ON business_accounts(owner_user_id,created_at);
+        CREATE TABLE IF NOT EXISTS business_members(
+          shop_id TEXT NOT NULL, user_id INTEGER NOT NULL, role TEXT NOT NULL CHECK(role IN ('owner','manager','staff')),
+          invited_by INTEGER NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(shop_id,user_id)
+        );
+        CREATE INDEX IF NOT EXISTS business_members_user ON business_members(user_id,shop_id);
+        CREATE TABLE IF NOT EXISTS business_member_audit(
+          id ${context.dialect==='postgres'?'BIGSERIAL':'INTEGER'} PRIMARY KEY, shop_id TEXT NOT NULL,
+          actor_user_id INTEGER NOT NULL, subject_user_id INTEGER NOT NULL, event_type TEXT NOT NULL,
+          old_role TEXT, new_role TEXT, occurred_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS business_verification_audit(
+          id ${context.dialect==='postgres'?'BIGSERIAL':'INTEGER'} PRIMARY KEY, shop_id TEXT NOT NULL,
+          actor_user_id INTEGER NOT NULL, old_status TEXT NOT NULL, new_status TEXT NOT NULL,
+          reason TEXT NOT NULL DEFAULT '', occurred_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS business_document_access_audit(
+          id ${context.dialect==='postgres'?'BIGSERIAL':'INTEGER'} PRIMARY KEY, shop_id TEXT NOT NULL,
+          reviewer_user_id INTEGER NOT NULL, accessed_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS shop_subscription_plans(
+          plan_key TEXT PRIMARY KEY, name TEXT NOT NULL, price_minor BIGINT NOT NULL,
+          max_active_listings INTEGER NOT NULL, max_quantity_per_listing INTEGER NOT NULL,
+          monthly_reports INTEGER NOT NULL, provider_plan_reference TEXT, active INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE TABLE IF NOT EXISTS shop_subscriptions(
+          shop_id TEXT PRIMARY KEY, plan_key TEXT NOT NULL, status TEXT NOT NULL,
+          provider TEXT, provider_subscription_id TEXT UNIQUE, current_period_end TEXT,
+          created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS shop_subscription_events(
+          id TEXT PRIMARY KEY, shop_id TEXT NOT NULL, provider_event_id TEXT UNIQUE,
+          event_type TEXT NOT NULL, plan_key TEXT NOT NULL, occurred_at TEXT NOT NULL, metadata TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS shop_subscription_events_shop ON shop_subscription_events(shop_id,occurred_at);
+      `);
+      const now=new Date().toISOString();
+      for (const [key,name,price,maxListings,maxQuantity,reports] of [
+        ['community','Community',0,3,1,0],['neighbourhood_plus','Neighbourhood Plus',49900,100,20,1]
+      ]) await context.query('INSERT INTO shop_subscription_plans(plan_key,name,price_minor,max_active_listings,max_quantity_per_listing,monthly_reports,active) VALUES(?,?,?,?,?,?,1) ON CONFLICT(plan_key) DO NOTHING',key,name,price,maxListings,maxQuantity,reports);
+      if(context.dialect==='sqlite') await context.exec(`
+        CREATE TRIGGER IF NOT EXISTS business_member_audit_no_update BEFORE UPDATE ON business_member_audit BEGIN SELECT RAISE(ABORT,'business_member_audit is append-only'); END;
+        CREATE TRIGGER IF NOT EXISTS business_member_audit_no_delete BEFORE DELETE ON business_member_audit BEGIN SELECT RAISE(ABORT,'business_member_audit is append-only'); END;
+        CREATE TRIGGER IF NOT EXISTS business_verification_audit_no_update BEFORE UPDATE ON business_verification_audit BEGIN SELECT RAISE(ABORT,'business_verification_audit is append-only'); END;
+        CREATE TRIGGER IF NOT EXISTS business_verification_audit_no_delete BEFORE DELETE ON business_verification_audit BEGIN SELECT RAISE(ABORT,'business_verification_audit is append-only'); END;
+        CREATE TRIGGER IF NOT EXISTS business_document_access_audit_no_update BEFORE UPDATE ON business_document_access_audit BEGIN SELECT RAISE(ABORT,'business_document_access_audit is append-only'); END;
+        CREATE TRIGGER IF NOT EXISTS business_document_access_audit_no_delete BEFORE DELETE ON business_document_access_audit BEGIN SELECT RAISE(ABORT,'business_document_access_audit is append-only'); END;
+        CREATE TRIGGER IF NOT EXISTS shop_subscription_events_no_update BEFORE UPDATE ON shop_subscription_events BEGIN SELECT RAISE(ABORT,'shop_subscription_events is append-only'); END;
+        CREATE TRIGGER IF NOT EXISTS shop_subscription_events_no_delete BEFORE DELETE ON shop_subscription_events BEGIN SELECT RAISE(ABORT,'shop_subscription_events is append-only'); END;
+      `);
+      else await context.exec(`
+        DROP TRIGGER IF EXISTS business_member_audit_append_only ON business_member_audit;
+        CREATE TRIGGER business_member_audit_append_only BEFORE UPDATE OR DELETE ON business_member_audit FOR EACH ROW EXECUTE FUNCTION prevent_protected_rental_mutation();
+        DROP TRIGGER IF EXISTS business_verification_audit_append_only ON business_verification_audit;
+        CREATE TRIGGER business_verification_audit_append_only BEFORE UPDATE OR DELETE ON business_verification_audit FOR EACH ROW EXECUTE FUNCTION prevent_protected_rental_mutation();
+        DROP TRIGGER IF EXISTS business_document_access_audit_append_only ON business_document_access_audit;
+        CREATE TRIGGER business_document_access_audit_append_only BEFORE UPDATE OR DELETE ON business_document_access_audit FOR EACH ROW EXECUTE FUNCTION prevent_protected_rental_mutation();
+        DROP TRIGGER IF EXISTS shop_subscription_events_append_only ON shop_subscription_events;
+        CREATE TRIGGER shop_subscription_events_append_only BEFORE UPDATE OR DELETE ON shop_subscription_events FOR EACH ROW EXECUTE FUNCTION prevent_protected_rental_mutation();
+      `);
+    }
+  },
+  {
+    version: 9,
+    name: 'consent-based shop member invitations',
+    async up(context) {
+      await context.exec(`
+        CREATE TABLE IF NOT EXISTS shop_member_invites(
+          id TEXT PRIMARY KEY, shop_id TEXT NOT NULL, invited_by INTEGER NOT NULL, invitee_user_id INTEGER NOT NULL,
+          invitee_email TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('manager','staff')),
+          status TEXT NOT NULL DEFAULT 'pending', expires_at TEXT NOT NULL, accepted_at TEXT, created_at TEXT NOT NULL,
+          UNIQUE(shop_id,invitee_user_id)
+        );
+        CREATE INDEX IF NOT EXISTS shop_member_invites_inbox ON shop_member_invites(invitee_user_id,status,expires_at);
+      `);
+    }
+  },
+  {
+    version: 10,
+    name: 'persist provider subscription checkout link',
+    async up(context) { await context.addColumn('shop_subscriptions','checkout_url','TEXT'); }
   }
 ];
 
@@ -309,7 +427,7 @@ function sqliteExecutor(db) {
 function postgresExecutor(client,pool) {
   const execute = async (sql,...args) => {
     let index = 0;
-  const qualified = sql.replace(/\b(FROM|JOIN|INTO|UPDATE|TABLE) (users|sessions|listings|saved|requests|messages|reports|ratings|demo_payments|email_verification_tokens|password_reset_tokens|booking_status_audit|money_ledger|marketplace_settings|uploads|schema_migrations|phone_otp_challenges|kyc_cases|kyc_access_audit|kyc_review_audit|owner_payment_accounts|protected_payments|payment_webhook_events|booking_evidence|booking_ratings|booking_late_fees|booking_claims|booking_claim_audit|booking_claim_evidence)\b/g,'$1 neighbourlink.$2');
+  const qualified = sql.replace(/\b(FROM|JOIN|INTO|UPDATE|TABLE) (users|sessions|listings|saved|requests|messages|reports|ratings|demo_payments|email_verification_tokens|password_reset_tokens|booking_status_audit|money_ledger|marketplace_settings|uploads|schema_migrations|phone_otp_challenges|kyc_cases|kyc_access_audit|kyc_review_audit|owner_payment_accounts|protected_payments|payment_webhook_events|booking_evidence|booking_ratings|booking_late_fees|booking_claims|booking_claim_audit|booking_claim_evidence|listing_availability_blocks|notification_outbox|business_accounts|business_members|business_member_audit|business_verification_audit|business_document_access_audit|shop_subscription_plans|shop_subscriptions|shop_subscription_events|shop_member_invites)\b/g,'$1 neighbourlink.$2');
     const result = await client.query(qualified.replaceAll('?',() => '$' + ++index),args);
     return { rows:result.rows, changes:result.rowCount };
   };

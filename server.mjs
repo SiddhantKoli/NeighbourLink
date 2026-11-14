@@ -18,9 +18,46 @@ const fail = (status, message) => { throw Object.assign(new Error(message), { st
 const all = async (sql, ...args) => (await query(sql, ...args)).rows;
 const get = async (sql, ...args) => (await all(sql, ...args))[0];
 const run = async (sql, ...args) => query(sql, ...args);
-const listings = 'SELECT l.id,l.owner,l.kind,l.title,l.category,l.price,l.item_value_minor,l.condition_checklist,l.area,l.latitude,l.longitude,l.description,l.active,(l.photo IS NOT NULL OR l.photo_key IS NOT NULL) AS hasPhoto,u.name FROM listings l JOIN users u ON u.id=l.owner';
+const shopRole=async(shopId,userId)=>get('SELECT role FROM business_members WHERE shop_id=? AND user_id=?',shopId,userId);
+async function requireShopRole(shopId,userId,roles=['owner','manager','staff']) {
+  const member=await shopRole(shopId,userId);
+  if(!member||!roles.includes(member.role)) fail(403,'You do not have permission for this shop.');
+  return member.role;
+}
+let notificationBusy=false;
+async function processNotifications() {
+  if (notificationBusy) return;
+  notificationBusy=true;
+  try {
+    const now=new Date().toISOString();
+    await run("UPDATE notification_outbox SET status='pending',locked_at=NULL WHERE status='sending' AND locked_at<?",new Date(Date.now()-600000).toISOString());
+    const pending=await all("SELECT * FROM notification_outbox WHERE status='pending' AND available_at<=? ORDER BY created_at LIMIT 15",now);
+    for (const message of pending) {
+      const claimed=await run("UPDATE notification_outbox SET status='sending',locked_at=? WHERE id=? AND status='pending'",now,message.id);
+      if (!claimed.changes) continue;
+      try {
+        await sendEmail({to:message.recipient_email,subject:message.subject,text:message.body});
+        await run("UPDATE notification_outbox SET status='sent',sent_at=?,locked_at=NULL,last_error=NULL WHERE id=? AND status='sending'",new Date().toISOString(),message.id);
+      } catch(error) {
+        const attempts=Number(message.attempts||0)+1,delay=Math.min(86400000,30000*2**Math.min(attempts,10));
+        await run("UPDATE notification_outbox SET status=?,attempts=?,available_at=?,locked_at=NULL,last_error=? WHERE id=? AND status='sending'",attempts>=8?'failed':'pending',attempts,new Date(Date.now()+delay).toISOString(),String(error.message||'Email delivery failed.').slice(0,500),message.id);
+      }
+    }
+  } finally { notificationBusy=false; }
+}
+async function queueNotification(userId,eventKey,subject,body) {
+  const recipient=await get('SELECT email FROM users WHERE id=? AND email_verified_at IS NOT NULL',userId);
+  if (!recipient) return;
+  const now=new Date().toISOString();
+  await run('INSERT INTO notification_outbox(id,event_key,recipient_email,subject,body,available_at,created_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(event_key) DO NOTHING',randomUUID(),eventKey,recipient.email,subject.slice(0,180),body.slice(0,2000),now,now);
+  void processNotifications().catch(error=>console.error('Notification delivery worker failed:',error.message));
+}
+function notifyUser(userId,eventKey,subject,body) {
+  void queueNotification(userId,eventKey,subject,body).catch(error=>console.error('Could not queue email notification:',error.message));
+}
+const listings = 'SELECT l.id,l.owner,l.shop_id,l.quantity_available,l.listing_status,l.kind,l.title,l.category,l.price,l.item_value_minor,l.condition_checklist,l.area,l.latitude,l.longitude,l.description,l.active,(l.photo IS NOT NULL OR l.photo_key IS NOT NULL) AS hasPhoto,u.name,(SELECT AVG(br.score) FROM booking_ratings br WHERE br.ratee_user_id=l.owner) AS gear_rating,(SELECT COUNT(*) FROM booking_ratings br WHERE br.ratee_user_id=l.owner) AS gear_rating_count,(SELECT AVG(rt.score) FROM ratings rt JOIN requests rr ON rr.id=rt.booking JOIN listings rl ON rl.id=rr.listing WHERE rl.owner=l.owner) AS hire_rating,(SELECT COUNT(*) FROM ratings rt JOIN requests rr ON rr.id=rt.booking JOIN listings rl ON rl.id=rr.listing WHERE rl.owner=l.owner) AS hire_rating_count FROM listings l JOIN users u ON u.id=l.owner';
 const threads = 'SELECT r.*,(SELECT payment_status FROM protected_payments WHERE booking=r.id) AS payment_status,(SELECT score FROM booking_ratings WHERE booking=r.id AND rater_user_id=r.requester) AS requester_score,(SELECT score FROM booking_ratings WHERE booking=r.id AND rater_user_id=l.owner) AS owner_score,l.price AS listing_price,l.condition_checklist,l.deposit_override_minor,l.title,l.owner,l.kind,u.name AS "requesterName",o.name AS "ownerName" FROM requests r JOIN listings l ON l.id=r.listing JOIN users u ON u.id=r.requester JOIN users o ON o.id=l.owner';
-const assets = new Map([['/', ['index.html','text/html']], ['/login', ['index.html','text/html']], ['/profile', ['index.html','text/html']], ['/verify-email', ['index.html','text/html']], ['/reset-password', ['index.html','text/html']], ['/landing.html', ['landing.html','text/html']], ['/landing.js', ['landing.js','text/javascript']], ['/borrow.html', ['borrow.html','text/html']], ['/borrow.js', ['borrow.js','text/javascript']], ['/portal.js', ['portal.js','text/javascript']], ['/portal.css', ['portal.css','text/css']], ['/app.js',['app.js','text/javascript']], ['/app.css',['app.css','text/css']]]);
+const assets = new Map([['/', ['index.html','text/html']], ['/login', ['index.html','text/html']], ['/profile', ['index.html','text/html']], ['/verify-email', ['index.html','text/html']], ['/reset-password', ['index.html','text/html']], ['/terms',['terms.html','text/html']], ['/privacy',['privacy.html','text/html']], ['/cancellation-refunds',['cancellation-refunds.html','text/html']], ['/banned-items',['banned-items.html','text/html']], ['/landing.html', ['landing.html','text/html']], ['/landing.js', ['landing.js','text/javascript']], ['/borrow.html', ['borrow.html','text/html']], ['/borrow.js', ['borrow.js','text/javascript']], ['/portal.js', ['portal.js','text/javascript']], ['/portal.css', ['portal.css','text/css']], ['/policy.css',['policy.css','text/css']], ['/app.js',['app.js','text/javascript']], ['/app.css',['app.css','text/css']]]);
 for (const name of ['camera','tent','bicycle']) {
   assets.set('/examples/' + name + '.jpg', ['photos/' + name + '.jpg','image/jpeg']);
 }
@@ -29,6 +66,11 @@ function validDate(value) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
   const date = new Date(value);
   return Number.isFinite(date.getTime()) && date.toISOString().slice(0,10) === value;
+}
+function distanceKm(latitude,longitude,otherLatitude,otherLongitude) {
+  const radians=value=>value*Math.PI/180,lat=radians(Number(otherLatitude)-Number(latitude)),lon=radians(Number(otherLongitude)-Number(longitude));
+  const a=Math.sin(lat/2)**2+Math.cos(radians(Number(latitude)))*Math.cos(radians(Number(otherLatitude)))*Math.sin(lon/2)**2;
+  return 6371*2*Math.asin(Math.sqrt(Math.min(1,a)));
 }
 function throttle(key,limit=20) {
   const now = Date.now();
@@ -151,16 +193,21 @@ async function recordPaymentCaptured(paymentRow,paymentId,actorUserId=null) {
   const rentTransfer=transfers.find(row=>row.notes?.part==='rental'||Number(row.amount)===Number(paymentRow.rent_minor)-Number(paymentRow.commission_minor))||transfers[0];
   const depositTransfer=transfers.find(row=>row.notes?.part==='deposit'||Number(row.amount)===Number(paymentRow.deposit_minor))||transfers[1];
   if (!rentTransfer?.id || !depositTransfer?.id || Number(rentTransfer.amount)!==Number(paymentRow.rent_minor)-Number(paymentRow.commission_minor) || Number(depositTransfer.amount)!==Number(paymentRow.deposit_minor) || rentTransfer.on_hold!==true || depositTransfer.on_hold!==true) fail(503,'The provider did not confirm the required held transfers. Contact support before retrying.');
-  const now=new Date().toISOString();
+  const now=new Date().toISOString();let bookingChanged=false;
   await query.transaction(async tx=>{
     const changed=await tx("UPDATE protected_payments SET provider_payment_id=?,payment_status='captured',rental_transfer_id=?,deposit_transfer_id=?,updated_at=? WHERE booking=? AND payment_status IN ('created','failed')",paymentId,rentTransfer.id,depositTransfer.id,now,paymentRow.booking);
     if (changed.changes) {
+      bookingChanged=true;
       await tx("UPDATE requests SET status='paid' WHERE id=? AND status='accepted'",paymentRow.booking);
       await tx("INSERT INTO booking_status_audit(booking,actor_user_id,old_status,new_status,occurred_at,metadata) VALUES(?,?, 'accepted','paid',?,'{}')",paymentRow.booking,actorUserId,now);
       const events=[['capture',paymentRow.amount_minor,'capture','customer payment'],['hold',paymentRow.rent_minor-paymentRow.commission_minor,'rent-hold','rental transfer'],['hold',paymentRow.deposit_minor,'deposit-hold','refundable deposit'],['commission',paymentRow.commission_minor,'commission','platform share']];
       for (const [type,amount,key,part] of events) if (amount>0) await tx('INSERT INTO money_ledger(booking,event_type,amount_minor,currency,provider,provider_reference,idempotency_key,actor_user_id,metadata,occurred_at) VALUES(?,?,?,?,?,?,?,?,?,?)',paymentRow.booking,type,amount,'INR','razorpay',key==='capture'?paymentId:key==='rent-hold'?rentTransfer.id:key==='deposit-hold'?depositTransfer.id:paymentRow.provider_order_id,'booking:'+paymentRow.booking+':'+key,actorUserId,JSON.stringify({paymentId,part}),now);
     }
   });
+  if (bookingChanged) {
+    const parties=await get('SELECT r.requester,l.owner,l.title FROM requests r JOIN listings l ON l.id=r.listing WHERE r.id=?',paymentRow.booking);
+    if (parties) for (const recipient of [parties.requester,parties.owner]) notifyUser(recipient,'booking:'+paymentRow.booking+':paid','Rental payment confirmed',parties.title+' is paid. Arrange handover and submit timestamped photos with the other neighbour.');
+  }
   return {ok:true,status:'paid'};
 }
 async function cancelPaidBooking(bookingId,actorUserId) {
@@ -253,6 +300,24 @@ async function handlePaymentWebhook(req,res) {
   if (await get('SELECT event_id FROM payment_webhook_events WHERE event_id=?',eventId)) return {ok:true,duplicate:true};
   let event;
   try { event=JSON.parse(raw.toString('utf8')); } catch { fail(400,'Invalid payment webhook body.'); }
+  const subscriptionEntity=event?.payload?.subscription?.entity;
+  if (subscriptionEntity?.id) {
+    const shopSubscription=await get('SELECT shop_id,plan_key FROM shop_subscriptions WHERE provider_subscription_id=?',subscriptionEntity.id);
+    if (shopSubscription) {
+      const statusMap={'subscription.activated':'active','subscription.authenticated':'active','subscription.charged':'active','subscription.halted':'past_due','subscription.cancelled':'cancelled','subscription.completed':'cancelled'};
+      const status=statusMap[event.event];
+      const currentPeriodEnd=Number.isFinite(Number(subscriptionEntity.current_end))&&Number(subscriptionEntity.current_end)>0?new Date(Number(subscriptionEntity.current_end)*1000).toISOString():null;
+      const paymentEntity=event?.payload?.payment?.entity;
+      await query.transaction(async tx=>{
+        if(status) await tx('UPDATE shop_subscriptions SET status=?,current_period_end=COALESCE(?,current_period_end),checkout_url=CASE WHEN ? IN (\'active\',\'cancelled\') THEN NULL ELSE checkout_url END,updated_at=? WHERE provider_subscription_id=?',status,currentPeriodEnd,status,new Date().toISOString(),subscriptionEntity.id);
+        await tx('INSERT INTO shop_subscription_events(id,shop_id,provider_event_id,event_type,plan_key,occurred_at,metadata) VALUES(?,?,?,?,?,?,?) ON CONFLICT(provider_event_id) DO NOTHING',randomUUID(),shopSubscription.shop_id,eventId,field(event,'event',100),shopSubscription.plan_key,new Date().toISOString(),JSON.stringify({subscriptionId:subscriptionEntity.id}));
+        if(event.event==='subscription.charged'&&paymentEntity?.id) await tx('INSERT INTO money_ledger(booking,event_type,amount_minor,currency,provider,provider_reference,idempotency_key,metadata,occurred_at) VALUES(NULL,?,?,?,?,?,?,?,?) ON CONFLICT(idempotency_key) DO NOTHING','subscription_charge',Number(paymentEntity.amount)||0,paymentEntity.currency||'INR','razorpay',paymentEntity.id,'shop:'+shopSubscription.shop_id+':subscription:'+paymentEntity.id,JSON.stringify({shopId:shopSubscription.shop_id,planKey:shopSubscription.plan_key}),new Date().toISOString());
+      });
+    }
+    const now=new Date().toISOString();
+    await run('INSERT INTO payment_webhook_events(event_id,event_type,received_at,processed_at) VALUES(?,?,?,?) ON CONFLICT DO NOTHING',eventId,field(event,'event',100),now,now);
+    return {ok:true};
+  }
   const entity=event?.payload?.payment?.entity;
   if (event.event==='payment.captured'&&entity?.id) {
     const paymentRow=await get('SELECT * FROM protected_payments WHERE provider_order_id=?',entity.order_id);
@@ -275,6 +340,7 @@ async function api(req, res, path) {
   }
   if (process.env.NODE_ENV === 'test' && method === 'GET' && path === '/__test/mailbox') {
     const recipient = new URL(req.url,'http://localhost').searchParams.get('to') || '';
+    await processNotifications();
     return takeTestMessages(recipient);
   }
   if (process.env.NODE_ENV === 'test' && method === 'GET' && path === '/__test/sms') {
@@ -373,6 +439,125 @@ async function api(req, res, path) {
     return {ok:true};
   }
   if (!user.emailVerified && !['/logout'].includes(path)) fail(403,'Confirm your email to continue.');
+  if(method==='GET'&&path==='/shops/plans') return await all('SELECT plan_key,name,price_minor,max_active_listings,max_quantity_per_listing,monthly_reports FROM shop_subscription_plans WHERE active=1 ORDER BY price_minor');
+  if(path==='/shops'&&method==='GET') return await all(`SELECT b.id,b.name,b.business_type,b.verification_status,m.role,s.plan_key,s.status AS subscription_status
+    FROM business_members m JOIN business_accounts b ON b.id=m.shop_id LEFT JOIN shop_subscriptions s ON s.shop_id=b.id WHERE m.user_id=? ORDER BY b.created_at DESC`,user.id);
+  if(path==='/shops'&&method==='POST') {
+    if(!user.profileComplete) fail(403,'Finish your verified profile before creating a shop.');
+    const body=await json(req),name=field(body,'name',100),businessType=field(body,'businessType',40);
+    if(!['sole_proprietor','partnership','private_limited','cooperative','other'].includes(businessType)) fail(400,'Choose a supported business type.');
+    const id=randomUUID(),now=new Date().toISOString();
+    await query.transaction(async tx=>{
+      await tx('INSERT INTO business_accounts(id,owner_user_id,name,business_type,registration_reference,verification_status,created_at) VALUES(?,?,?,?,?,\'unverified\',?)',id,user.id,name,businessType,field(body,'registrationReference',80,false),now);
+      await tx('INSERT INTO business_members(shop_id,user_id,role,invited_by,created_at) VALUES(?,?,\'owner\',?,?)',id,user.id,user.id,now);
+      await tx('INSERT INTO business_member_audit(shop_id,actor_user_id,subject_user_id,event_type,new_role,occurred_at) VALUES(?,?,?,\'created\',\'owner\',?)',id,user.id,user.id,now);
+      await tx('INSERT INTO shop_subscriptions(shop_id,plan_key,status,created_at,updated_at) VALUES(?,\'community\',\'active\',?,?)',id,now,now);
+    });
+    return {id,name,businessType,role:'owner',verificationStatus:'unverified',planKey:'community'};
+  }
+  if(path==='/shop-invitations'&&method==='GET') return await all("SELECT i.id,i.shop_id,i.role,i.expires_at,b.name AS shop_name,u.name AS inviter_name FROM shop_member_invites i JOIN business_accounts b ON b.id=i.shop_id JOIN users u ON u.id=i.invited_by WHERE i.invitee_user_id=? AND i.status='pending' AND i.expires_at>? ORDER BY i.created_at DESC",user.id,new Date().toISOString());
+  const acceptShopInvite=path.match(/^\/shop-invitations\/([a-f0-9-]{36})\/accept$/i);
+  if(acceptShopInvite&&method==='POST') {
+    if(!user.profileComplete) fail(403,'Complete your profile before joining a shop team.');
+    const invite=await get("SELECT i.* FROM shop_member_invites i JOIN users u ON u.id=i.invitee_user_id WHERE i.id=? AND i.invitee_user_id=? AND lower(i.invitee_email)=lower(u.email) AND i.status='pending' AND i.expires_at>?",acceptShopInvite[1],user.id,new Date().toISOString());
+    if(!invite) fail(404,'This shop invitation is unavailable or expired.');
+    const now=new Date().toISOString();
+    await query.transaction(async tx=>{
+      const accepted=await tx("UPDATE shop_member_invites SET status='accepted',accepted_at=? WHERE id=? AND invitee_user_id=? AND status='pending' AND expires_at>?",now,invite.id,user.id,now);
+      if(!accepted.changes) fail(409,'This invitation was already accepted or expired.');
+      await tx('INSERT INTO business_members(shop_id,user_id,role,invited_by,created_at) VALUES(?,?,?,?,?)',invite.shop_id,user.id,invite.role,invite.invited_by,now);
+      await tx('INSERT INTO business_member_audit(shop_id,actor_user_id,subject_user_id,event_type,new_role,occurred_at) VALUES(?,?,?,\'invitation_accepted\',?,?)',invite.shop_id,user.id,user.id,invite.role,now);
+    });
+    return {ok:true,shopId:invite.shop_id,role:invite.role};
+  }
+  const shopPath=path.match(/^\/shops\/([a-f0-9-]{36})(?:\/(.*))?$/i);
+  if(shopPath) {
+    const shopId=shopPath[1],action=shopPath[2]||'';
+    const role=await requireShopRole(shopId,user.id);
+    if(!action&&method==='GET') {
+      const shop=await get('SELECT id,name,business_type,registration_reference,verification_status,submitted_at,decision_reason FROM business_accounts WHERE id=?',shopId);
+      if(!shop) fail(404,'Shop unavailable.');
+      if(role==='staff') {shop.registration_reference='';shop.decision_reason='';}
+      const members=await all("SELECT m.user_id,m.role,u.name,u.email FROM business_members m JOIN users u ON u.id=m.user_id WHERE m.shop_id=? ORDER BY CASE m.role WHEN 'owner' THEN 0 WHEN 'manager' THEN 1 ELSE 2 END",shopId);
+      const pendingInvitations=role==='owner'||role==='manager'?await all("SELECT i.id,i.invitee_email,i.role,i.expires_at,u.name AS inviter_name FROM shop_member_invites i JOIN users u ON u.id=i.invited_by WHERE i.shop_id=? AND i.status='pending' AND i.expires_at>? ORDER BY i.created_at DESC",shopId,new Date().toISOString()):[];
+      const subscription=await get('SELECT s.plan_key,s.status,s.current_period_end,s.checkout_url,p.name,p.price_minor,p.max_active_listings,p.max_quantity_per_listing,p.monthly_reports FROM shop_subscriptions s JOIN shop_subscription_plans p ON p.plan_key=s.plan_key WHERE s.shop_id=?',shopId);
+      return {...shop,role,members,pendingInvitations,subscription,inventory:await all('SELECT id,title,kind,quantity_available,listing_status,active FROM listings WHERE shop_id=? ORDER BY id DESC',shopId)};
+    }
+    if(action==='verification'&&method==='POST') {
+      if(role!=='owner') fail(403,'Only the shop owner can submit business verification.');
+      const uploadId=field(await json(req),'uploadId',36),upload=await get("SELECT storage_key,content_type FROM uploads WHERE id=? AND user_id=? AND purpose='business-doc' AND consumed_at IS NULL AND created_at>?",uploadId,user.id,new Date(Date.now()-3600000).toISOString());
+      if(!upload) fail(400,'Upload a current business registration document first.');
+      const previous=await get('SELECT verification_status,verification_document_key FROM business_accounts WHERE id=?',shopId);if(!previous) fail(404,'Shop unavailable.');
+      const now=new Date().toISOString();
+      await query.transaction(async tx=>{
+        const used=await tx("UPDATE uploads SET consumed_at=? WHERE id=? AND user_id=? AND purpose='business-doc' AND consumed_at IS NULL",now,uploadId,user.id);if(!used.changes) fail(400,'This document was already submitted.');
+        await tx("UPDATE business_accounts SET verification_status='pending',verification_document_key=?,verification_document_type=?,submitted_at=?,reviewed_at=NULL,reviewer_user_id=NULL,decision_reason=NULL WHERE id=?",upload.storage_key,upload.content_type,now,shopId);
+        await tx('INSERT INTO business_verification_audit(shop_id,actor_user_id,old_status,new_status,reason,occurred_at) VALUES(?,?,?,\'pending\',?,?)',shopId,user.id,previous.verification_status,'Documents submitted by shop owner.',now);
+      });
+      if(previous.verification_document_key) await storage.remove(previous.verification_document_key).catch(()=>{});
+      return {ok:true,status:'pending'};
+    }
+    if(action==='members'&&method==='POST') {
+      if(!['owner','manager'].includes(role)) fail(403,'Only owners and managers can manage staff.');
+      const body=await json(req),email=field(body,'email',254).toLowerCase(),newRole=field(body,'role',20);
+      if(!['manager','staff'].includes(newRole)||role==='manager'&&newRole!=='staff') fail(403,'Your role cannot assign that permission.');
+      const target=await get('SELECT id,email FROM users WHERE email=? AND email_verified_at IS NOT NULL',email);if(!target) fail(404,'That person needs a verified NeighbourLink account first.');
+      if(await shopRole(shopId,target.id)) fail(409,'This person already belongs to the shop.');
+      const existingInvite=await get("SELECT role FROM shop_member_invites WHERE shop_id=? AND invitee_user_id=? AND status='pending' AND expires_at>?",shopId,target.id,new Date().toISOString());
+      if(role==='manager'&&existingInvite?.role==='manager') fail(403,'Only the shop owner can manage manager invitations.');
+      const inviteId=randomUUID(),now=new Date().toISOString(),expiresAt=new Date(Date.now()+7*86400000).toISOString();
+      await run("INSERT INTO shop_member_invites(id,shop_id,invited_by,invitee_user_id,invitee_email,role,status,expires_at,created_at) VALUES(?,?,?,?,?,?,'pending',?,?) ON CONFLICT(shop_id,invitee_user_id) DO UPDATE SET id=excluded.id,invited_by=excluded.invited_by,invitee_email=excluded.invitee_email,role=excluded.role,status='pending',expires_at=excluded.expires_at,accepted_at=NULL,created_at=excluded.created_at",inviteId,shopId,user.id,target.id,target.email,newRole,expiresAt,now);
+      await run('INSERT INTO business_member_audit(shop_id,actor_user_id,subject_user_id,event_type,new_role,occurred_at) VALUES(?,?,?,\'invited\',?,?)',shopId,user.id,target.id,newRole,now);
+      const origin=process.env.PUBLIC_ORIGIN||'http://'+req.headers.host;
+      notifyUser(target.id,'shop-invite:'+inviteId,'NeighbourLink shop invitation',user.name+' invited you to join '+(await get('SELECT name FROM business_accounts WHERE id=?',shopId)).name+' as '+newRole+'. Sign in to accept: '+origin+'/login?shopInvite='+inviteId);
+      return {ok:true,invitationId:inviteId,role:newRole,status:'pending',expiresAt};
+    }
+    const memberDelete=action.match(/^members\/(\d+)$/);
+    if(memberDelete&&method==='DELETE') {
+      if(role!=='owner') fail(403,'Only the shop owner can remove staff.');
+      const targetId=Number(memberDelete[1]),previous=await shopRole(shopId,targetId);if(!previous||previous.role==='owner') fail(404,'Shop staff member unavailable.');
+      const now=new Date().toISOString();await query.transaction(async tx=>{await tx("DELETE FROM business_members WHERE shop_id=? AND user_id=? AND role<>'owner'",shopId,targetId);await tx('INSERT INTO business_member_audit(shop_id,actor_user_id,subject_user_id,event_type,old_role,occurred_at) VALUES(?,?,?,\'removed\',?,?)',shopId,user.id,targetId,previous.role,now);});return {ok:true};
+    }
+    if(action==='reports'&&method==='GET') {
+      if(role==='staff') fail(403,'Manager or owner access is required for shop reports.');
+      return {listings:await get('SELECT COUNT(*) AS total,COUNT(CASE WHEN active=1 THEN 1 END) AS published FROM listings WHERE shop_id=?',shopId),bookings:await get("SELECT COUNT(*) AS total,COUNT(CASE WHEN r.status IN ('completed','resolved') THEN 1 END) AS completed FROM requests r JOIN listings l ON l.id=r.listing WHERE l.shop_id=?",shopId),releasedThroughProviderMinor:Number((await get("SELECT COALESCE(SUM(CASE WHEN m.event_type IN ('payout','late_fee_payout') THEN m.amount_minor ELSE 0 END),0) AS amount FROM money_ledger m JOIN requests r ON r.id=m.booking JOIN listings l ON l.id=r.listing WHERE l.shop_id=?",shopId)).amount||0),inventory:await all('SELECT kind,listing_status,COUNT(*) AS listings,COALESCE(SUM(quantity_available),0) AS units FROM listings WHERE shop_id=? GROUP BY kind,listing_status',shopId)};
+    }
+    if(action==='subscription'&&method==='POST') {
+      if(role!=='owner') fail(403,'Only the shop owner can change the subscription.');
+      const planKey=field(await json(req),'planKey',40),plan=await get('SELECT * FROM shop_subscription_plans WHERE plan_key=? AND active=1',planKey);if(!plan) fail(404,'That subscription plan is unavailable.');
+      if(planKey==='community') {
+        const current=await get('SELECT provider,provider_subscription_id FROM shop_subscriptions WHERE shop_id=?',shopId);
+        if(current?.provider_subscription_id) {
+          if(!payments?.cancelShopSubscription) fail(503,'The payment provider cannot cancel this shop subscription yet.');
+          try {await payments.cancelShopSubscription(current.provider_subscription_id);}catch(error){fail(error.status||503,error.message||'Subscription cancellation was not confirmed.');}
+        }
+        await run("UPDATE shop_subscriptions SET plan_key='community',status='active',provider=NULL,provider_subscription_id=NULL,current_period_end=NULL,checkout_url=NULL,updated_at=? WHERE shop_id=?",new Date().toISOString(),shopId);
+        const eventTime=new Date().toISOString();
+        await run('INSERT INTO shop_subscription_events(id,shop_id,event_type,plan_key,occurred_at,metadata) VALUES(?,?,\'plan_selected\',?,?,?)',randomUUID(),shopId,planKey,eventTime,JSON.stringify({cancelledSubscriptionId:current?.provider_subscription_id||null}));
+        return {ok:true,planKey,status:'active'};
+      }
+      if(!payments?.createShopSubscription) fail(503,'Paid plans require Razorpay TEST credentials and a TEST subscription plan. No charge was made.');
+      const current=await get('SELECT plan_key,status,checkout_url FROM shop_subscriptions WHERE shop_id=?',shopId);
+      if(current?.plan_key===planKey&&current.status==='active') return {ok:true,planKey,status:'active'};
+      if(current?.plan_key===planKey&&current.status==='pending_auth'&&current.checkout_url) return {ok:true,planKey,status:'pending_auth',checkoutUrl:current.checkout_url};
+      if(current?.status==='active'&&current.plan_key!=='community') fail(409,'Cancel the current paid plan before starting another subscription.');
+      if(current?.status==='pending_auth') fail(409,'A shop subscription checkout is already waiting for confirmation.');
+      let providerSubscription;
+      try {providerSubscription=await payments.createShopSubscription({shopId,planKey,expectedAmountMinor:Number(plan.price_minor)});}
+      catch(error) {fail(error.status||503,error.message||'Could not start subscription checkout.');}
+      if(!providerSubscription?.id||!providerSubscription?.short_url) fail(503,'Payment provider did not return a subscription checkout link.');
+      const now=new Date().toISOString();
+      await run("UPDATE shop_subscriptions SET plan_key=?,status='pending_auth',provider='razorpay',provider_subscription_id=?,checkout_url=?,updated_at=? WHERE shop_id=?",planKey,providerSubscription.id,providerSubscription.short_url,now,shopId);
+      await run('INSERT INTO shop_subscription_events(id,shop_id,event_type,plan_key,occurred_at,metadata) VALUES(?,?,\'checkout_created\',?,?,?)',randomUUID(),shopId,planKey,now,JSON.stringify({providerSubscriptionId:providerSubscription.id}));
+      return {ok:true,planKey,status:'pending_auth',checkoutUrl:providerSubscription.short_url};
+    }
+    fail(404,'Shop action unavailable.');
+  }
+  if(path==='/admin/shops'&&method==='GET') {if(!admin) fail(403,'Admin access is required.');return await all("SELECT b.id,b.name,b.business_type,b.verification_status,b.registration_reference,b.submitted_at,b.decision_reason,u.name AS owner_name,u.email AS owner_email FROM business_accounts b JOIN users u ON u.id=b.owner_user_id ORDER BY CASE b.verification_status WHEN 'pending' THEN 0 ELSE 1 END,b.created_at DESC LIMIT 200");}
+  const shopReview=path.match(/^\/admin\/shops\/([a-f0-9-]{36})\/verification$/i);
+  if(shopReview&&method==='PATCH') {if(!admin) fail(403,'Admin access is required.');const body=await json(req);if(!['verified','suspended','unverified'].includes(body.status)) fail(400,'Choose a valid business decision.');const row=await get('SELECT verification_status FROM business_accounts WHERE id=?',shopReview[1]);if(!row) fail(404,'Shop unavailable.');const now=new Date().toISOString(),reason=field(body,'reason',500,false);await query.transaction(async tx=>{await tx('UPDATE business_accounts SET verification_status=?,decision_reason=?,reviewed_at=?,reviewer_user_id=? WHERE id=?',body.status,reason,now,user.id,shopReview[1]);await tx('INSERT INTO business_verification_audit(shop_id,actor_user_id,old_status,new_status,reason,occurred_at) VALUES(?,?,?,?,?,?)',shopReview[1],user.id,row.verification_status,body.status,reason,now);});return {ok:true,status:body.status};}
+  const shopDocument=path.match(/^\/admin\/shops\/([a-f0-9-]{36})\/document$/i);
+  if(shopDocument&&method==='GET') {if(!admin) fail(403,'Admin access is required.');const row=await get('SELECT verification_document_key,verification_document_type FROM business_accounts WHERE id=?',shopDocument[1]);if(!row?.verification_document_key) fail(404,'Business document unavailable.');const stored=await storage.get(row.verification_document_key);if(!stored) fail(404,'Business document unavailable.');let bytes;try{bytes=kyc.decrypt(stored.bytes);}catch{fail(500,'Business document cannot be decrypted.');}await run('INSERT INTO business_document_access_audit(shop_id,reviewer_user_id,accessed_at) VALUES(?,?,?)',shopDocument[1],user.id,new Date().toISOString());return {binary:true,bytes,contentType:row.verification_document_type};}
   if (method === 'POST' && path === '/phone-otp/send') {
     throttle(req.socket.remoteAddress);
     const profile=await get('SELECT phone,phone_verified_at FROM users WHERE id=?',user.id);
@@ -414,14 +599,16 @@ async function api(req, res, path) {
   if (method === 'POST' && path === '/uploads') {
     throttle('uploads:' + req.socket.remoteAddress,60);
     const purpose=req.headers['x-upload-purpose'];
-    if (!['profile','listing','kyc-id','kyc-selfie','booking-handover','booking-return','booking-claim'].includes(purpose)) fail(400,'Choose a valid image purpose.');
+    if (!['profile','listing','kyc-id','kyc-selfie','business-doc','booking-handover','booking-return','booking-claim'].includes(purpose)) fail(400,'Choose a valid image purpose.');
     if (purpose === 'listing' && !user.profileComplete) fail(403,'Complete your profile before listing items.');
     if (purpose.startsWith('kyc-') && !user.profileComplete) fail(403,'Verify your phone and finish your profile before identity verification.');
+    if (purpose==='business-doc'&&!user.profileComplete) fail(403,'Complete your profile before verifying a shop.');
     if (purpose.startsWith('booking-') && !user.profileComplete) fail(403,'Complete your profile before adding booking evidence.');
     const {bytes,contentType,image}=await readImageRequest(req);
     const id=randomUUID();
-    const storageKey=(purpose.startsWith('booking-')?'evidence/':'users/'+user.id+'/') + purpose + '/' + id + '.' + image.extension;
-    await storage.put(storageKey,purpose.startsWith('kyc-') ? kyc.encrypt(bytes) : bytes,purpose.startsWith('kyc-') ? 'application/octet-stream' : contentType);
+    const storageKey=(purpose.startsWith('booking-')?'evidence/':purpose==='business-doc'?'business/'+user.id+'/':'users/'+user.id+'/') + purpose + '/' + id + '.' + image.extension;
+    const encrypted=purpose.startsWith('kyc-')||purpose==='business-doc';
+    await storage.put(storageKey,encrypted ? kyc.encrypt(bytes) : bytes,encrypted ? 'application/octet-stream' : contentType);
     try {
       await run('INSERT INTO uploads(id,user_id,purpose,storage_key,content_type,byte_size,created_at) VALUES(?,?,?,?,?,?,?)',id,user.id,purpose,storageKey,contentType,bytes.length,new Date().toISOString());
     } catch(error) { await storage.remove(storageKey).catch(() => {}); throw error; }
@@ -455,7 +642,81 @@ async function api(req, res, path) {
     });
     return {ok:true,phoneVerified:phone===current.phone && Boolean(user.phoneVerifiedAt)};
   }
-  if (method === 'GET' && path === '/listings') return await all(listings + ' WHERE l.active=1 ORDER BY l.id DESC');
+  const calendar=path.match(/^\/listings\/(\d+)\/availability$/);
+  if (calendar) {
+    const listingId=Number(calendar[1]),item=await get('SELECT owner,kind FROM listings WHERE id=? AND active=1',listingId);
+    if (!item) fail(404,'Listing unavailable.');
+    if (item.kind!=='gear') fail(400,'Availability calendars are for Gear rentals.');
+    if (method==='GET') {
+      const blocks=await all('SELECT id,start_date,end_date,\'owner_block\' AS source FROM listing_availability_blocks WHERE listing=?',listingId);
+      const bookings=await all("SELECT NULL AS id,start_date,end_date,'rental' AS source FROM requests WHERE listing=? AND is_gear=1 AND status IN ('accepted','paid','active','returned','claim_window','disputed','resolved','completed')",listingId);
+      return [...blocks,...bookings].sort((a,b)=>a.start_date.localeCompare(b.start_date));
+    }
+    if (method==='POST') {
+      if (item.owner!==user.id) fail(403,'Only the listing owner can block dates.');
+      const body=await json(req),start=field(body,'startDate',10),end=field(body,'endDate',10),today=new Date().toISOString().slice(0,10);
+      if (!validDate(start)||!validDate(end)||start<today||end<start||(Date.parse(end)-Date.parse(start))/86400000>90) fail(400,'Choose future dates for a block of up to 91 days.');
+      if (await get("SELECT id FROM requests WHERE listing=? AND is_gear=1 AND status IN ('accepted','paid','active','returned','claim_window','disputed','resolved','completed') AND start_date<=? AND end_date>=?",listingId,end,start)) fail(409,'Those dates already have a rental booking.');
+      if (await get('SELECT id FROM listing_availability_blocks WHERE listing=? AND start_date<=? AND end_date>=?',listingId,end,start)) fail(409,'That block overlaps dates you already blocked.');
+      const id=randomUUID();await run('INSERT INTO listing_availability_blocks(id,listing,owner_user_id,start_date,end_date,created_at) VALUES(?,?,?,?,?,?)',id,listingId,user.id,start,end,new Date().toISOString());
+      return {ok:true,id,start_date:start,end_date:end};
+    }
+  }
+  const unblock=path.match(/^\/listings\/(\d+)\/availability\/([a-f0-9-]{36})$/i);
+  if (unblock&&method==='DELETE') {
+    const changed=await run('DELETE FROM listing_availability_blocks WHERE id=? AND listing=? AND owner_user_id=?',unblock[2],Number(unblock[1]),user.id);
+    if (!changed.changes) fail(404,'Date block unavailable.');
+    return {ok:true};
+  }
+  if (method === 'GET' && path === '/listings') {
+    const params=new URL(req.url,'http://localhost').searchParams,kind=params.get('kind')||'',category=params.get('category')||'';
+    if (kind&&!['gear','help'].includes(kind)) fail(400,'Choose the Gear or Hire portal.');
+    const categoryOptions={gear:['Tools','Tech & Camera','Outdoors'],help:['Home repair','Creative','Lessons']};
+    if (category&&kind&& !categoryOptions[kind].includes(category)) fail(400,'Choose a category from this portal.');
+    const minPrice=params.has('minPrice')?Number(params.get('minPrice')):null,maxPrice=params.has('maxPrice')?Number(params.get('maxPrice')):null;
+    if ((minPrice!=null&&(!Number.isSafeInteger(minPrice)||minPrice<0||minPrice>10000000))||(maxPrice!=null&&(!Number.isSafeInteger(maxPrice)||maxPrice<0||maxPrice>10000000))||(minPrice!=null&&maxPrice!=null&&minPrice>maxPrice)) fail(400,'Enter a valid rupee price range.');
+    let minRating=params.has('minRating')?Number(params.get('minRating')):0;
+    if (!Number.isFinite(minRating)||minRating<0||minRating>5) fail(400,'Rating filter must be between zero and five.');
+    const latitude=params.has('latitude')?Number(params.get('latitude')):null,longitude=params.has('longitude')?Number(params.get('longitude')):null,radius=params.has('radius')?Number(params.get('radius')):null;
+    if ((latitude==null)!==(longitude==null)||(latitude!=null&&(!Number.isFinite(latitude)||Math.abs(latitude)>90||!Number.isFinite(longitude)||Math.abs(longitude)>180))) fail(400,'Enter a valid location.');
+    if (radius!=null&&(!Number.isFinite(radius)||radius<0.1||radius>500||latitude==null)) fail(400,'Distance must be between 0.1 and 500 km and requires a location.');
+    const startDate=params.get('startDate')||'',endDate=params.get('endDate')||'';
+    if (Boolean(startDate)!==Boolean(endDate)) fail(400,'Choose both a start and end date.');
+    if (startDate&&(!validDate(startDate)||!validDate(endDate)||endDate<startDate)) fail(400,'Choose a valid date range.');
+    if (startDate&&kind==='gear') {
+      const duration=Math.round((Date.parse(endDate)-Date.parse(startDate))/86400000)+1;
+      if (duration>Number((await settingValues(['max_rental_days'])).max_rental_days||30)) fail(400,'The date range is longer than the allowed rental period.');
+    }
+    const sort=params.get('sort')||'newest';
+    if (!['newest','nearest','price','rating'].includes(sort)) fail(400,'Choose a valid sort order.');
+    const conditions=['l.active=1'],args=[];
+    if (kind) {conditions.push('l.kind=?');args.push(kind);}
+    if (category) {conditions.push('l.category=?');args.push(category);}
+    if (minPrice!=null) {conditions.push('l.price>=?');args.push(minPrice);}
+    if (maxPrice!=null) {conditions.push('l.price<=?');args.push(maxPrice);}
+    if (startDate&&kind==='gear') {
+      conditions.push("NOT EXISTS (SELECT 1 FROM listing_availability_blocks b WHERE b.listing=l.id AND b.start_date<=? AND b.end_date>=?)");args.push(endDate,startDate);
+      conditions.push("(SELECT COUNT(*) FROM requests rr WHERE rr.listing=l.id AND rr.is_gear=1 AND rr.status IN ('accepted','paid','active','returned','claim_window','disputed','resolved','completed') AND rr.start_date<=? AND rr.end_date>=?) < l.quantity_available");args.push(endDate,startDate);
+    }
+    if (startDate&&kind==='help') {
+      conditions.push("(SELECT COUNT(*) FROM requests rr WHERE rr.listing=l.id AND rr.status IN ('accepted','completion_proposed') AND rr.start_date<=? AND rr.end_date>=?) < l.quantity_available");args.push(endDate,startDate);
+    }
+    let rows=await all(listings+' WHERE '+conditions.join(' AND ')+' ORDER BY l.id DESC LIMIT 500',...args);
+    rows=rows.map(row=>{
+      const gearCount=Number(row.gear_rating_count||0),hireCount=Number(row.hire_rating_count||0),ratingCount=gearCount+hireCount;
+      const rating=ratingCount?(Number(row.gear_rating||0)*gearCount+Number(row.hire_rating||0)*hireCount)/ratingCount:null;
+      const distance=latitude==null||row.latitude==null||row.longitude==null?null:distanceKm(latitude,longitude,row.latitude,row.longitude);
+      const result={...row,owner_rating:rating==null?null:Number(rating.toFixed(2)),rating_count:ratingCount,distance_km:distance==null?null:Number(distance.toFixed(2))};
+      delete result.gear_rating;delete result.gear_rating_count;delete result.hire_rating;delete result.hire_rating_count;
+      return result;
+    });
+    if (minRating>0) rows=rows.filter(row=>row.owner_rating!=null&&row.owner_rating>=minRating);
+    if (radius!=null) rows=rows.filter(row=>row.distance_km!=null&&row.distance_km<=radius);
+    if (sort==='nearest') rows.sort((a,b)=>(a.distance_km??Infinity)-(b.distance_km??Infinity)||b.id-a.id);
+    if (sort==='price') rows.sort((a,b)=>a.price-b.price||b.id-a.id);
+    if (sort==='rating') rows.sort((a,b)=>(b.owner_rating??-1)-(a.owner_rating??-1)||b.id-a.id);
+    return rows;
+  }
   if (method === 'POST' && path === '/logout') {
     await run('DELETE FROM sessions WHERE token=?', digest(token));
     cookie(res, '', 0);
@@ -528,7 +789,7 @@ async function api(req, res, path) {
       get('SELECT COUNT(*) AS total,COUNT(CASE WHEN active=1 THEN 1 END) AS active FROM listings'),
       get("SELECT COUNT(*) AS captured,COUNT(CASE WHEN r.status='completed' THEN 1 END) AS completed,COUNT(CASE WHEN r.status IN ('disputed','resolved') THEN 1 END) AS claims FROM requests r JOIN protected_payments p ON p.booking=r.id WHERE p.payment_status='captured'"),
       get("SELECT COUNT(*) AS open FROM booking_claims WHERE status IN ('open','resolving')"),
-      get("SELECT COALESCE(SUM(CASE WHEN event_type='commission' THEN amount_minor ELSE 0 END),0) AS revenue,COALESCE(SUM(CASE WHEN event_type='claim_deduction' THEN amount_minor ELSE 0 END),0) AS claim_deductions,COALESCE(SUM(CASE WHEN event_type='capture' THEN amount_minor ELSE 0 END),0) AS captured_minor FROM money_ledger")
+      get("SELECT COALESCE(SUM(CASE WHEN event_type IN ('commission','subscription_charge') THEN amount_minor ELSE 0 END),0) AS revenue,COALESCE(SUM(CASE WHEN event_type='claim_deduction' THEN amount_minor ELSE 0 END),0) AS claim_deductions,COALESCE(SUM(CASE WHEN event_type='capture' THEN amount_minor ELSE 0 END),0) AS captured_minor FROM money_ledger")
     ]);
     const repeat=await get("SELECT COUNT(*) AS repeat_users,(SELECT COUNT(DISTINCT requester) FROM requests WHERE status IN ('completed','resolved')) AS completed_users FROM (SELECT requester FROM requests WHERE status IN ('completed','resolved') GROUP BY requester HAVING COUNT(*)>=2) repeat_renters");
     const completed=Number(bookings.completed||0),captured=Number(bookings.captured||0);
@@ -567,6 +828,20 @@ async function api(req, res, path) {
       statusHistory:await all('SELECT old_status,new_status,occurred_at,actor_user_id FROM booking_status_audit WHERE booking=? ORDER BY id',row.booking),
       claimHistory:await all('SELECT event_type,event_data,occurred_at,actor_user_id FROM booking_claim_audit WHERE booking=? ORDER BY id',row.booking)
     })));
+  }
+  if (path==='/seller/dashboard'&&method==='GET') {
+    const [released,listingsCount,bookingCount,held]=await Promise.all([
+      get("SELECT COALESCE(SUM(CASE WHEN m.event_type IN ('payout','late_fee_payout') THEN m.amount_minor ELSE 0 END),0) AS amount FROM money_ledger m JOIN requests r ON r.id=m.booking JOIN listings l ON l.id=r.listing WHERE l.owner=? OR l.shop_id IN (SELECT shop_id FROM business_members WHERE user_id=?)",user.id,user.id),
+      get('SELECT COUNT(*) AS total,COUNT(CASE WHEN active=1 THEN 1 END) AS active FROM listings l WHERE l.owner=? OR l.shop_id IN (SELECT shop_id FROM business_members WHERE user_id=?)',user.id,user.id),
+      get("SELECT COUNT(*) AS total,COUNT(CASE WHEN status IN ('completed','resolved') THEN 1 END) AS completed FROM requests r JOIN listings l ON l.id=r.listing WHERE l.owner=? OR l.shop_id IN (SELECT shop_id FROM business_members WHERE user_id=?)",user.id,user.id),
+      all("SELECT r.id,r.status,r.start_date,r.end_date,r.due_at,r.claim_deadline,r.deposit_minor,p.rent_minor,p.commission_minor,p.deposit_minor AS held_deposit,l.title FROM requests r JOIN listings l ON l.id=r.listing JOIN protected_payments p ON p.booking=r.id WHERE (l.owner=? OR l.shop_id IN (SELECT shop_id FROM business_members WHERE user_id=?)) AND p.payment_status='captured' AND p.settlement_status='open' ORDER BY COALESCE(r.claim_deadline,r.due_at),r.id LIMIT 50",user.id,user.id)
+    ]);
+    const windowHours=Number((await settingValues(['claim_window_hours'])).claim_window_hours||24);
+    const upcoming=held.map(row=>{
+      const deadline=row.claim_deadline|| (row.due_at?new Date(Date.parse(row.due_at)+windowHours*3600000).toISOString():null);
+      return {booking:row.id,title:row.title,status:row.status,estimated_release_at:deadline,rental_release_minor:Number(row.rent_minor)-Number(row.commission_minor),refundable_deposit_minor:Number(row.held_deposit||row.deposit_minor||0)};
+    });
+    return {listings:{total:Number(listingsCount.total||0),active:Number(listingsCount.active||0)},bookings:{total:Number(bookingCount.total||0),completed:Number(bookingCount.completed||0)},releasedThroughProviderMinor:Number(released.amount||0),heldWithProvider:{rentalMinor:upcoming.reduce((sum,row)=>sum+row.rental_release_minor,0),refundableDepositMinor:upcoming.reduce((sum,row)=>sum+row.refundable_deposit_minor,0)},upcoming};
   }
   const resolveClaim=path.match(/^\/admin\/claims\/(\d+)\/resolve$/);
   if (resolveClaim&&method==='POST') {
@@ -638,7 +913,7 @@ async function api(req, res, path) {
     }
   }
   if (method === 'GET' && path === '/activity') return {
-    listings: await all(listings + ' WHERE l.owner=? ORDER BY l.id DESC', user.id),
+    listings: await all(listings + ' WHERE l.owner=? OR l.shop_id IN (SELECT shop_id FROM business_members WHERE user_id=?) ORDER BY l.id DESC', user.id,user.id),
     saved: (await all('SELECT listing FROM saved WHERE "user"=?', user.id)).map(row => row.listing),
     threads: (await all(threads + ' WHERE r.requester=? OR l.owner=? ORDER BY r.id DESC', user.id, user.id)).map(row=>({...row,score:user.id===row.requester?row.requester_score:row.owner_score,otherScore:user.id===row.requester?row.owner_score:row.requester_score})),
     reports: admin ? await all('SELECT reports.*,listings.title FROM reports JOIN listings ON listings.id=reports.listing WHERE reports.status=?', 'open') : []
@@ -709,6 +984,21 @@ async function api(req, res, path) {
       Math.abs(body.latitude) > 90 || Math.abs(body.longitude) > 180)) fail(400,'Invalid listing location.');
     const latitude = hasCoordinates ? Math.round(body.latitude * 100) / 100 : null;
     const longitude = hasCoordinates ? Math.round(body.longitude * 100) / 100 : null;
+    const shopId=body.shopId==null||body.shopId===''?'':field(body,'shopId',36);
+    let shop=null,listingRole=null,quantity=1,status=body.status||'published';
+    if(!['draft','published'].includes(status)) fail(400,'Choose draft or published status.');
+    if(shopId) {
+      listingRole=await requireShopRole(shopId,user.id);
+      shop=await get('SELECT s.plan_key,p.max_active_listings,p.max_quantity_per_listing FROM shop_subscriptions s JOIN shop_subscription_plans p ON p.plan_key=s.plan_key WHERE s.shop_id=? AND s.status=\'active\'',shopId);
+      if(!shop) fail(403,'An active shop plan is required to list under this shop.');
+      quantity=body.quantity==null?1:Number(body.quantity);
+      if(!Number.isInteger(quantity)||quantity<1||quantity>Number(shop.max_quantity_per_listing)) fail(400,'Quantity exceeds the selected shop plan limit.');
+      if(status==='published'&&listingRole==='staff') fail(403,'Staff can prepare drafts; a manager or owner must publish them.');
+      if(status==='published') {
+        const total=await get('SELECT COUNT(*) AS total FROM listings WHERE shop_id=? AND active=1',shopId);
+        if(Number(total.total||0)>=Number(shop.max_active_listings)) fail(403,'This shop has reached its active-listing plan limit.');
+      }
+    } else if(body.quantity!=null&&Number(body.quantity)!==1) fail(400,'Multi-unit stock is available through a shop account.');
     if (body.photo != null) fail(400,'Upload listing photos through the image upload endpoint.');
     const uploadId=field(body,'photoUploadId',36);
     const upload=await get("SELECT storage_key FROM uploads WHERE id=? AND user_id=? AND purpose='listing' AND consumed_at IS NULL AND created_at>?",uploadId,user.id,new Date(Date.now()-3600000).toISOString());
@@ -717,14 +1007,37 @@ async function api(req, res, path) {
     await query.transaction(async tx => {
       const used=await tx("UPDATE uploads SET consumed_at=? WHERE id=? AND user_id=? AND purpose='listing' AND consumed_at IS NULL",new Date().toISOString(),uploadId,user.id);
       if (!used.changes) fail(400,'That listing photo has already been used. Upload it again.');
-      listingId=(await tx('INSERT INTO listings(owner,kind,title,category,price,item_value_minor,condition_checklist,deposit_override_minor,area,description,photo,photo_key,latitude,longitude) VALUES(?,?,?,?,?,?,?,?,?,?,NULL,?,?,?) RETURNING id',
-        user.id,kind,field(body,'title',100),category,body.price,itemValueMinor,JSON.stringify(conditionChecklist||[]),depositOverride,field(body,'area',100),field(body,'description',1200),upload.storage_key,latitude,longitude)).rows[0].id;
+      listingId=(await tx('INSERT INTO listings(owner,kind,title,category,price,item_value_minor,condition_checklist,deposit_override_minor,area,description,photo,photo_key,latitude,longitude,shop_id,quantity_available,listing_status,active) VALUES(?,?,?,?,?,?,?,?,?,?,NULL,?,?,?,?,?,?,?) RETURNING id',
+        user.id,kind,field(body,'title',100),category,body.price,itemValueMinor,JSON.stringify(conditionChecklist||[]),depositOverride,field(body,'area',100),field(body,'description',1200),upload.storage_key,latitude,longitude,shopId||null,quantity,status,status==='published'?1:0)).rows[0].id;
     });
     return {id:listingId};
   }
+  const listingAction=path.match(/^\/listings\/(\d+)\/(status|duplicate)$/);
+  if(listingAction) {
+    const listingId=Number(listingAction[1]),item=await get('SELECT * FROM listings WHERE id=?',listingId);if(!item) fail(404,'Listing unavailable.');
+    let role=item.shop_id?await requireShopRole(item.shop_id,user.id):item.owner===user.id?'owner':null;
+    if(!role) fail(404,'Listing unavailable.');
+    if(listingAction[2]==='status'&&method==='PATCH') {
+      if(!['owner','manager'].includes(role)) fail(403,'Only a shop owner or manager can publish listings.');
+      const status=field(await json(req),'status',20);if(!['draft','published'].includes(status)) fail(400,'Choose draft or published status.');
+      if(status==='published'&&item.shop_id) {
+        const plan=await get('SELECT p.max_active_listings FROM shop_subscriptions s JOIN shop_subscription_plans p ON p.plan_key=s.plan_key WHERE s.shop_id=? AND s.status=\'active\'',item.shop_id);
+        const total=await get('SELECT COUNT(*) AS total FROM listings WHERE shop_id=? AND active=1',item.shop_id);
+        if(!plan||Number(total.total||0)>=Number(plan.max_active_listings)) fail(403,'This shop has reached its active-listing plan limit.');
+      }
+      const active=status==='published'?1:0;
+      if(active===0&&await get("SELECT id FROM requests WHERE listing=? AND status IN ('accepted','paid','active','returned','claim_window','disputed','resolved','completion_proposed') LIMIT 1",listingId)) fail(409,'An active booking prevents unpublishing this listing.');
+      await run('UPDATE listings SET listing_status=?,active=? WHERE id=?',status,active,listingId);return {ok:true,status};
+    }
+    if(listingAction[2]==='duplicate'&&method==='POST') {
+      const cloned=await run('INSERT INTO listings(owner,kind,title,category,price,item_value_minor,condition_checklist,deposit_override_minor,area,description,photo,photo_key,latitude,longitude,shop_id,quantity_available,listing_status,active) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, ?,\'draft\',0) RETURNING id',user.id,item.kind,'Copy of '+String(item.title).slice(0,90),item.category,item.price,item.item_value_minor,item.condition_checklist,item.deposit_override_minor,item.area,item.description,item.photo,item.photo_key,item.latitude,item.longitude,item.shop_id,item.quantity_available||1);
+      return {id:cloned.rows[0].id,status:'draft'};
+    }
+  }
   if (match?.[1] === 'listings' && method === 'DELETE') {
-    if (!await get('SELECT id FROM listings WHERE id=? AND owner=?', id,user.id)) fail(404,'Listing unavailable.');
-    const result = await run("UPDATE listings SET active=0 WHERE id=? AND owner=? AND NOT EXISTS (SELECT 1 FROM requests WHERE listing=? AND (status IN ('accepted','paid','active','returned','claim_window','disputed','resolved','completion_proposed') OR (is_gear=1 AND status='completed')))", id,user.id,id);
+    const item=await get('SELECT owner,shop_id FROM listings WHERE id=?',id),role=item?.shop_id?await shopRole(item.shop_id,user.id):item?.owner===user.id?{role:'owner'}:null;
+    if(!role||!['owner','manager'].includes(role.role)) fail(404,'Listing unavailable.');
+    const result = await run("UPDATE listings SET active=0,listing_status='draft' WHERE id=? AND NOT EXISTS (SELECT 1 FROM requests WHERE listing=? AND (status IN ('accepted','paid','active','returned','claim_window','disputed','resolved','completion_proposed') OR (is_gear=1 AND status='completed')))", id,id);
     if (!result.changes) fail(409,'Finish or cancel the active booking before unpublishing.');
     return { ok: true };
   }
@@ -737,7 +1050,7 @@ async function api(req, res, path) {
   }
   if (match?.[1] === 'requests') {
     if (method === 'PUT' && !match[3]) {
-      const listing = await get('SELECT owner,kind,category,item_value_minor,deposit_override_minor FROM listings WHERE id=? AND active=1', id);
+    const listing = await get('SELECT owner,kind,category,item_value_minor,deposit_override_minor,quantity_available FROM listings WHERE id=? AND active=1', id);
       if (!listing) fail(404, 'Listing unavailable.');
       if (listing.owner === user.id) fail(400, 'You own this listing.');
       if (user.kycStatus==='suspended') fail(403,'This account cannot request rentals while its identity status is suspended. Contact support.');
@@ -748,6 +1061,7 @@ async function api(req, res, path) {
       const end = listing.kind === 'gear' ? field(body,'endDate',10) : start;
       const details = field(body,'details',1000,listing.kind === 'help');
       if (!validDate(start) || !validDate(end) || start < new Date().toISOString().slice(0,10) || end < start) fail(400,'Choose valid dates starting today or later.');
+      if (listing.kind==='gear'&&await get('SELECT id FROM listing_availability_blocks WHERE listing=? AND start_date<=? AND end_date>=?',id,end,start)) fail(409,'The owner has blocked one or more of those dates. Choose another range.');
       let quote={amount:0,days:1,multiplier:1};
       if (listing.kind==='gear') quote=await depositQuote(listing,user.id,start,end);
       const created=await query.transaction(async tx=>{
@@ -755,9 +1069,13 @@ async function api(req, res, path) {
         const inserted=await tx('INSERT INTO requests(listing,requester,start_date,end_date,details,is_gear,status,deposit_minor,risk_multiplier,due_at) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING RETURNING id',id,user.id,start,end,details,listing.kind==='gear'?1:0,status,quote.amount,quote.multiplier,listing.kind==='gear'?new Date(Date.parse(end+'T23:59:59.000Z')).toISOString():null);
         const result=inserted.rows[0] || (await tx('SELECT id FROM requests WHERE listing=? AND requester=?',id,user.id)).rows[0];
         if (inserted.rows[0]) await tx('INSERT INTO booking_status_audit(booking,actor_user_id,old_status,new_status,occurred_at,metadata) VALUES(?,?,\'none\',?,?,?)',result.id,user.id,status,new Date().toISOString(),JSON.stringify({depositMinor:quote.amount,riskMultiplier:quote.multiplier}));
-        return result;
+        return {...result,isNew:Boolean(inserted.rows[0])};
       });
       const saved=await get('SELECT id,deposit_minor,start_date,end_date FROM requests WHERE id=?',created.id);
+      if (created.isNew) {
+        const summary=await get('SELECT l.owner,l.title,u.name AS renter_name FROM listings l JOIN users u ON u.id=? WHERE l.id=?',user.id,id);
+        if (summary) notifyUser(summary.owner,'booking:'+created.id+':request','A neighbour requested your listing',summary.renter_name+' requested '+summary.title+' for '+start+(listing.kind==='gear'?' through '+end:'')+'. Sign in to review the request.');
+      }
       return {...created,depositMinor:Number(saved.deposit_minor||0),days:Math.max(1,Math.round((Date.parse(saved.end_date)-Date.parse(saved.start_date))/86400000)+1)};
     }
     const thread = await get(threads + ' WHERE r.id=? AND (r.requester=? OR l.owner=?)', id, user.id, user.id);
@@ -766,7 +1084,9 @@ async function api(req, res, path) {
     if (match[3]==='evidence'&&method==='GET') return await all('SELECT e.id,e.uploader_user_id,e.phase,e.uploaded_at,u.name FROM booking_evidence e JOIN users u ON u.id=e.uploader_user_id WHERE e.booking=? ORDER BY e.uploaded_at',id);
     if (match[3] === 'messages' && method === 'GET') return (await all('SELECT id,sender,body,sent FROM messages WHERE request=? ORDER BY id DESC LIMIT 200', id)).reverse();
     if (match[3] === 'messages' && method === 'POST') {
-      await run('INSERT INTO messages(request,sender,body) VALUES(?,?,?)', id, user.id, field(await json(req), 'message', 2000));
+      const body=field(await json(req),'message',2000),sent=await run('INSERT INTO messages(request,sender,body) VALUES(?,?,?) RETURNING id',id,user.id,body);
+      const recipient=thread.owner===user.id?thread.requester:thread.owner;
+      notifyUser(recipient,'message:'+sent.rows[0].id,'New NeighbourLink message','You have a new message about '+thread.title+'. Sign in to continue the conversation.');
       return { ok: true };
     }
     if (match[3]==='evidence'&&method==='POST') {
@@ -832,6 +1152,7 @@ async function api(req, res, path) {
         if (!changed.changes) fail(409,'The claim window has closed.');
         await tx("INSERT INTO booking_status_audit(booking,actor_user_id,old_status,new_status,occurred_at,metadata) VALUES(?,?,'claim_window','disputed',?,?)",id,user.id,now,JSON.stringify({claim:true}));
       });
+      notifyUser(thread.requester,'booking:'+id+':claim','An owner raised a rental claim',thread.title+': the owner submitted a claim with a supporting photo. Sign in to review it and respond.');
       return {ok:true,status:'disputed'};
     }
     if (match[3]==='claim'&&method==='PATCH') {
@@ -843,6 +1164,7 @@ async function api(req, res, path) {
         await tx("INSERT INTO booking_claim_audit(booking,actor_user_id,event_type,event_data,occurred_at) VALUES(?,?,'renter_response',?,?)",id,user.id,JSON.stringify({response}),now);
         return true;
       });
+      notifyUser(thread.owner,'booking:'+id+':claim-response','The renter responded to a claim',thread.title+': the renter has submitted a response. Sign in to review the case.');
       return {ok:saved};
     }
     if (match[3]==='contact'&&method==='GET') {
@@ -956,7 +1278,7 @@ async function api(req, res, path) {
       const allowed = transitions[thread.status] || [];
       if (!allowed.includes(status)) fail(409, 'This request cannot change to that status.');
       const booking = status === 'accepted' && thread.kind === 'gear' && thread.start_date;
-      const overlap = " AND NOT EXISTS (SELECT 1 FROM requests booked WHERE booked.listing=? AND booked.id<>? AND booked.status IN ('accepted','paid','active','returned','claim_window','disputed','resolved','completed') AND booked.start_date<=? AND booked.end_date>=?)";
+      const overlap = " AND (SELECT COUNT(*) FROM requests booked WHERE booked.listing=? AND booked.id<>? AND booked.status IN ('accepted','paid','active','returned','claim_window','disputed','resolved','completed') AND booked.start_date<=? AND booked.end_date>=?) < (SELECT quantity_available FROM listings WHERE id=?) AND NOT EXISTS (SELECT 1 FROM listing_availability_blocks avb WHERE avb.listing=? AND avb.start_date<=? AND avb.end_date>=?)";
       try {
         const column = {accepted:'accepted_at', active:'pickup_at', returned:'return_at', completed:'completed_at'}[status];
         const assignments = ['status=?'];
@@ -970,8 +1292,9 @@ async function api(req, res, path) {
           values.push(String(thread.listing_price));
         }
         await query.transaction(async tx => {
+          if(booking) await tx('UPDATE listings SET quantity_available=quantity_available WHERE id=?',thread.listing);
           const result = await tx('UPDATE requests SET ' + assignments.join(', ') + ' WHERE id=? AND status=?' + (booking ? overlap : ''),
-            ...values,id,thread.status,...(booking ? [thread.listing,id,thread.end_date,thread.start_date] : []));
+            ...values,id,thread.status,...(booking ? [thread.listing,id,thread.end_date,thread.start_date,thread.listing,thread.listing,thread.end_date,thread.start_date] : []));
           if (!result.changes) fail(409, booking ? 'These rental dates are already booked or the request changed.' : 'Request changed. Refresh and try again.');
           await tx('INSERT INTO booking_status_audit(booking,actor_user_id,old_status,new_status,occurred_at,metadata) VALUES(?,?,?,?,?,?)',
             id,user.id,thread.status,status,new Date().toISOString(),'{}');
@@ -980,6 +1303,8 @@ async function api(req, res, path) {
         if (error.code === '23P01') fail(409,'These rental dates are already booked.');
         throw error;
       }
+      const otherParty=owner?thread.requester:thread.owner;
+      if (['accepted','declined','cancelled','completed','completion_proposed'].includes(status)) notifyUser(otherParty,'booking:'+id+':status:'+status,'Booking update: '+status.replaceAll('_',' '),thread.title+' is now '+status.replaceAll('_',' ')+'. Sign in to see the details.');
       return { ok: true };
     }
   }
@@ -1015,6 +1340,9 @@ kycCleanupTimer.unref();
 const claimTimer=setInterval(()=>processClaimWindows().catch(error=>console.error('Claim window worker failed:',error.message)),30000);
 claimTimer.unref();
 processClaimWindows().catch(()=>{});
+const notificationTimer=setInterval(()=>processNotifications().catch(error=>console.error('Notification delivery worker failed:',error.message)),5000);
+notificationTimer.unref();
+processNotifications().catch(()=>{});
 
 createServer(async (req,res) => {
   const path = new URL(req.url, 'http://localhost').pathname;
@@ -1029,7 +1357,8 @@ createServer(async (req,res) => {
     if (req.method === 'GET' && protectedPages.includes(path) && !viewer) {
       res.writeHead(302, { Location:'/login' }).end();
     } else if (req.method === 'GET' && path === '/login' && viewer) {
-      res.writeHead(302, { Location:viewer.emailVerified ? '/' : '/verify-email' }).end();
+      const invitation=new URL(req.url,'http://localhost').searchParams.get('shopInvite');
+      res.writeHead(302, { Location:(viewer.emailVerified ? '/' : '/verify-email')+(invitation?'?shopInvite='+encodeURIComponent(invitation):'') }).end();
     } else if (req.method === 'GET' && protectedPages.includes(path) && viewer && !viewer.emailVerified) {
       res.writeHead(302, { Location:'/verify-email' }).end();
     } else if (req.method === 'GET' && protectedPages.includes(path) && path !== '/profile' && viewer && !viewer.profileComplete) {
