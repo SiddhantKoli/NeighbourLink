@@ -8,9 +8,11 @@
   "scripts": {
     "start": "node --env-file-if-exists=.env server.mjs",
     "test": "node --test",
-    "start:supabase": "node --env-file-if-exists=.env supabase-start.mjs"
+    "start:supabase": "node --env-file=.env supabase-start.mjs",
+    "backup:sqlite": "node scripts/sqlite-backup.mjs"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1169.0",
     "pg": "^8.23.1"
   }
 }

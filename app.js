@@ -6,7 +6,7 @@ const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({
 const categories = { gear: ['Tools','Tech & Camera','Outdoors'], help: ['Home repair','Creative','Lessons'] };
 const groups = { Tools:'tools', 'Tech & Camera':'tech', Outdoors:'outdoors', 'Home repair':'home', Creative:'creative', Lessons:'lessons' };
 const filters = { home:'all', rentals:'all', services:'all' };
-const views = ['landing','home','rentals','services','saved','messages','dashboard','login','profile'];
+const views = ['landing','home','rentals','services','saved','messages','dashboard','login','profile','verify','reset'];
 const examples = [
   { kind:'gear', title:'Digital camera kit', category:'Tech & Camera', area:'Indiranagar, Bengaluru', description:'Camera with lens and strap for a weekend shoot.', price:900, photo:'camera' },
   { kind:'gear', title:'Two-person camping tent', category:'Outdoors', area:'Domlur, Bengaluru', description:'Compact tent for a short camping trip.', price:400, photo:'tent' },
@@ -92,7 +92,7 @@ const authFields =
 const auth = $('#login-panel');
 auth.innerHTML = '<div class="auth-heading"><span class="auth-eyebrow">WELCOME TO NEIGHBOURLINK</span><h1 id="account-dialog-title">Welcome back.</h1>' +
   '<p id="auth-intro">Sign in to share more with the people around you.</p></div><form>' + authFields +
-  '<p role="alert" class="nl-error"></p><button class="btn primary auth-submit" type="submit">Sign in</button>' +
+  '<p role="alert" class="nl-error"></p><button class="btn primary auth-submit" type="submit">Sign in</button><button type="button" class="auth-back" id="forgot-password">Forgot password?</button>' +
   '<p class="auth-switch"><span id="auth-switch-prompt">New around here?</span> <button type="button" id="auth-mode">Create an account</button></p></form>';
 $('#password-toggle').onclick = () => {
   const field = $('#auth-password');
@@ -165,7 +165,10 @@ async function api(path, method = 'GET', body) {
     method, headers: body ? { 'Content-Type':'application/json' } : {}, body: body ? JSON.stringify(body) : undefined
   });
   const data = await response.json();
-  if (response.status === 403 && path !== '/profile') { navigate('profile'); throw Error(data.error || 'Complete your profile to continue.'); }
+  if (response.status === 403 && path !== '/profile') {
+    navigate((data.error || '').toLowerCase().includes('confirm your email') ? 'verify' : 'profile');
+    throw Error(data.error || 'Complete your account setup to continue.');
+  }
   if (response.status === 401 && !['/login','/signup'].includes(path)) {
     user = null;
     items = [];
@@ -175,6 +178,12 @@ async function api(path, method = 'GET', body) {
   }
   if (!response.ok) throw Error(data.error || 'Request failed.');
   return data;
+}
+async function uploadImage(file,purpose) {
+  const response=await fetch('/api/v1/uploads',{method:'POST',headers:{'Content-Type':file.type,'X-Upload-Purpose':purpose},body:file});
+  const data=await response.json();
+  if (!response.ok) throw Error(data.error || 'Photo upload failed.');
+  return data.uploadId;
 }
 function toast(text) {
   const node = $('#toast');
@@ -207,6 +216,7 @@ function renderAuth(signup) {
   const name = auth.querySelector('[name="name"]');
   name.parentElement.hidden = !signup;
   name.parentElement.style.display = signup ? 'grid' : 'none';
+    $('#forgot-password').hidden = signup;
   name.required = signup;
   auth.querySelector('[name="password"]').autocomplete = signup ? 'new-password' : 'current-password';
   auth.querySelector('.primary').textContent = signup ? 'Create account' : 'Sign in';
@@ -230,9 +240,18 @@ function requireUser(action) {
   return navigate('login');
 }
 $('#auth-mode').onclick = () => renderAuth(auth.dataset.mode !== 'signup');
+$('#forgot-password').onclick = () => {
+  $('#reset-request-form').elements.email.value=auth.querySelector('[name="email"]').value;
+  navigate('reset');
+};
 submit(auth, async form => {
   await api('/' + auth.dataset.mode, 'POST', Object.fromEntries(form));
   user = await api('/session');
+  if (!user.emailVerified) {
+    auth.querySelector('form').reset();
+    await navigate('verify');
+    return;
+  }
   if (!user.profileComplete) {
     await navigate('profile');
     return;
@@ -257,13 +276,8 @@ profileForm.addEventListener('submit',event => {
     try {
       const file = profileForm.elements.photoFile.files[0];
       if (!file || file.size > 1000000 || !['image/jpeg','image/png','image/webp'].includes(file.type)) throw Error('Choose a JPEG, PNG, or WebP face photo under 1 MB.');
-      const photo = await new Promise((resolve,reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result);
-        reader.onerror = () => reject(Error('Could not read that photo.'));
-        reader.readAsDataURL(file);
-      });
-      await api('/profile','PUT',{name:profileForm.elements.name.value,email:profileForm.elements.email.value,phone:profileForm.elements.phone.value,photo});
+      const photoUploadId=await uploadImage(file,'profile');
+      await api('/profile','PUT',{name:profileForm.elements.name.value,email:profileForm.elements.email.value,phone:profileForm.elements.phone.value,photoUploadId});
       user = await api('/session');
       activateProtectedFrames();
       await refresh();
@@ -284,6 +298,56 @@ $('#profile-theme').onclick = () => {
   document.body.dataset.theme = next;
   try { localStorage.setItem('nl-theme',next); } catch {}
 };
+for (const id of ['verify-theme','reset-theme']) {
+  $('#' + id).onclick = () => {
+    const next=document.body.dataset.theme === 'dark' ? 'light' : 'dark';
+    document.body.dataset.theme=next;
+    try { localStorage.setItem('nl-theme',next); } catch {}
+  };
+}
+const verifyForm=$('#verify-form');
+verifyForm.addEventListener('submit',event => {
+  event.preventDefault();
+  $('#verify-error').textContent='';
+  perform(async () => {
+    try {
+      await api('/verify-email','POST',{token:verifyForm.elements.token.value});
+      user=await api('/session');
+      if (!user) { await navigate('login'); toast('Email confirmed. Sign in to continue.'); return; }
+      if (!user.profileComplete) await navigate('profile');
+      else { await refresh(); await navigate('landing'); }
+    } catch(error) { $('#verify-error').textContent=error.message; }
+  });
+});
+$('#verify-resend').onclick=() => perform(async () => {
+  await api('/email-verification/resend','POST',{});
+  $('#verify-status').textContent='If the address still needs confirmation, a new link is on its way.';
+});
+$('#reset-request-form').addEventListener('submit',event => {
+  event.preventDefault();
+  const form=event.currentTarget;
+  $('#reset-request-error').textContent='';
+  perform(async () => {
+    try {
+      await api('/password-reset','POST',{email:form.elements.email.value});
+      $('#reset-status').textContent='If that address belongs to a verified account, a reset link is on its way.';
+    } catch(error) { $('#reset-request-error').textContent=error.message; }
+  });
+});
+$('#reset-complete-form').addEventListener('submit',event => {
+  event.preventDefault();
+  const form=event.currentTarget;
+  $('#reset-complete-error').textContent='';
+  perform(async () => {
+    try {
+      await api('/password-reset/complete','POST',{token:form.elements.token.value,password:form.elements.password.value});
+      user=null;
+      $('#reset-status').textContent='Your password has been changed. Sign in with the new password.';
+      form.hidden=true;
+    } catch(error) { $('#reset-complete-error').textContent=error.message; }
+  });
+});
+$('#reset-back').onclick=() => navigate('login');
 accountButton.onclick = () => perform(() => user ? navigate('dashboard') : requireUser(() => navigate('dashboard')));
 
 function changeCategories() {
@@ -330,16 +394,9 @@ submit(listing, async form => {
   body.price = Number(body.price);
   if (listingLocation) Object.assign(body,listingLocation);
   if (!file.size) throw Error('Choose a photo of the item or your work.');
-  body.photo = '';
-  if (file.size) {
-    if (file.size > 1000000 || !['image/jpeg','image/png','image/webp'].includes(file.type)) throw Error('Choose a JPEG, PNG, or WebP photo under 1 MB.');
-    body.photo = await new Promise((resolve,reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(reader.result);
-      reader.onerror = () => reject(Error('Could not read photo.'));
-      reader.readAsDataURL(file);
-    });
-  }
+  if (file.size > 1000000 || !['image/jpeg','image/png','image/webp'].includes(file.type)) throw Error('Choose a JPEG, PNG, or WebP photo under 1 MB.');
+  body.photoUploadId=await uploadImage(file,'listing');
+  delete body.photo;
   await api('/listings','POST',body);
   listing.close();
   query = '';
@@ -466,14 +523,16 @@ async function refresh() {
   render();
 }
 function navigate(next, updateHash = true) {
-  if (!user && next !== 'login') { next = 'login'; updateHash = true; }
-  if (user && !user.profileComplete && !['profile','login'].includes(next)) { next = 'profile'; updateHash = true; }
+  if (!user && !['login','verify','reset'].includes(next)) { next = 'login'; updateHash = true; }
+  if (user && !user.emailVerified && !['verify','login','reset'].includes(next)) { next = 'verify'; updateHash = true; }
+  if (user && user.emailVerified && !user.profileComplete && !['profile','login','verify','reset'].includes(next)) { next = 'profile'; updateHash = true; }
   if (next === 'home') next = 'rentals';
   if (!views.includes(next)) next = 'landing';
   view = next;
-  const route = next === 'landing' ? '/' : next === 'login' ? '/login' : next === 'profile' ? '/profile' : '/#' + next;
+  const currentToken=new URLSearchParams(location.search).get('token');
+  const route = next === 'landing' ? '/' : next === 'login' ? '/login' : next === 'profile' ? '/profile' : next === 'verify' ? '/verify-email' + (currentToken ? '?token=' + encodeURIComponent(currentToken) : '') : next === 'reset' ? '/reset-password' + (currentToken ? '?token=' + encodeURIComponent(currentToken) : '') : '/#' + next;
   if (updateHash && location.pathname + location.hash !== route) history.pushState(null,'',route);
-  document.body.classList.toggle('nl-login',['login','profile'].includes(next));
+  document.body.classList.toggle('nl-login',['login','profile','verify','reset'].includes(next));
   if (next === 'login') {
     if (!afterSignIn) signInReturn = 'landing';
     try { document.body.dataset.theme = localStorage.getItem('nl-theme') || 'light'; } catch { document.body.dataset.theme = 'light'; }
@@ -484,6 +543,18 @@ function navigate(next, updateHash = true) {
     profileForm.elements.name.value = user?.name || '';
     profileForm.elements.email.value = user?.email || '';
     try { document.body.dataset.theme = localStorage.getItem('nl-theme') || 'light'; } catch { document.body.dataset.theme = 'light'; }
+  }
+  if (next === 'verify') {
+    verifyForm.elements.token.value=currentToken || '';
+    $('#verify-copy').textContent=user?.email ? 'Open the confirmation link we sent to ' + user.email + '. Email must be confirmed before you can continue.' : 'Open the confirmation link in your email, then sign in to continue.';
+    $('#verify-resend').hidden=!user;
+    try { document.body.dataset.theme=localStorage.getItem('nl-theme') || 'light'; } catch { document.body.dataset.theme='light'; }
+  }
+  if (next === 'reset') {
+    $('#reset-request-form').hidden=!!currentToken;
+    $('#reset-complete-form').hidden=!currentToken;
+    $('#reset-complete-form').elements.token.value=currentToken || '';
+    try { document.body.dataset.theme=localStorage.getItem('nl-theme') || 'light'; } catch { document.body.dataset.theme='light'; }
   }
   const portal = ['rentals','services','saved','messages','dashboard'].includes(next);
   document.querySelectorAll('.view').forEach(section => section.classList.toggle('active',section.id === 'view-' + (portal ? 'rentals' : next)));
@@ -715,14 +786,15 @@ $('#message-form').onsubmit = event => {
     } finally { button.disabled = false; }
   });
 };
-function currentRoute() { return location.pathname === '/login' ? 'login' : location.pathname === '/profile' ? 'profile' : location.hash.slice(1) || 'landing'; }
+function currentRoute() { return location.pathname === '/login' ? 'login' : location.pathname === '/profile' ? 'profile' : location.pathname === '/verify-email' ? 'verify' : location.pathname === '/reset-password' ? 'reset' : location.hash.slice(1) || 'landing'; }
 window.addEventListener('popstate',() => perform(() => navigate(currentRoute(),Boolean(!user))));
 perform(async () => {
   const requested = currentRoute();
   try { user = await api('/session'); } catch { user = null; }
   try {
-    if (!user) return navigate('login');
-    if (!user.profileComplete) return navigate('profile');
+    if (!user) return navigate(['reset','verify'].includes(requested) ? requested : 'login');
+    if (!user.emailVerified) return navigate('verify',false);
+    if (!user.profileComplete) return navigate('profile',false);
     activateProtectedFrames();
     await navigate(requested === 'login' ? 'landing' : requested,requested === 'login');
     await refresh();
