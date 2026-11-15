@@ -91,6 +91,7 @@ The browser and a future desktop app can use the same versioned API. For an Elec
 - Owners approve requests; participants have a private conversation and can leave mutual ratings after Gear bookings complete.
 - Account creation requires email verification and a complete profile with a validated phone number and profile photo.
 - The Gear request dialog shows booked and owner-blocked dates in a month calendar. Selecting pickup and return days updates the rental and deposit quote before a request is sent.
+- Gear browsing has quick filters for this weekend and gear under ₹500 per day, plus the existing nearest-first sort, area search, and distance display when location is shared.
 - Phone numbers are verified using single-use, rate-limited SMS codes. Gear listings include item value; new renters are limited to lower-value items until they build rental history and ratings.
 - Gear listings include a condition checklist and calculated refundable deposit. Both renter and owner submit private pickup and return photos; phone contact becomes visible only after payment. Paid bookings include a settings-governed cancellation window, claim window and late-fee assessment.
 - During the claim window an owner can submit a claim with a supporting photo. The renter can reply once. Authorized admins compare the claim photo with handover/return evidence, conversation and status history before deciding the deposit outcome. Photos remain private to participants and admins.

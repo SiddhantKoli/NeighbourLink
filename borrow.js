@@ -3,7 +3,7 @@ const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&
 const money = value => '₹' + Number(value || 0).toLocaleString('en-IN');
 let initialPortal = 'rentals';
 try { if (sessionStorage.getItem('nl-portal') === 'services') initialPortal = 'services'; } catch {}
-const state = {items:[], saved:[], user:null, location:null, area:'', view:'rentals', portal:initialPortal, activity:{saved:[],threads:[],listings:[]}, threadId:null, messages:[], category:'all', query:'', sort:'near', selected:null, radius:10, loading:true, filtered:false};
+const state = {items:[], saved:[], user:null, location:null, area:'', view:'rentals', portal:initialPortal, activity:{saved:[],threads:[],listings:[]}, threadId:null, messages:[], category:'all', query:'', sort:'near', selected:null, radius:10, loading:true, filtered:false,weekend:false,budget:false};
 const categories = [['all','All gear'],['tools','Tools'],['tech','Tech & camera'],['outdoors','Outdoors']];
 const group = {'Tools':'tools','Tech & Camera':'tech','Outdoors':'outdoors'};
 const examples = [
@@ -39,7 +39,9 @@ function art(item, extras = '') {
 }
 function render() {
   if (typeof renderChrome === 'function') renderChrome();
+  document.querySelector('.quick-filters').hidden=state.view!=='rentals';
   if (state.view !== 'rentals' && typeof renderPortal === 'function') return renderPortal();
+  $('weekend-filter').setAttribute('aria-pressed',String(state.weekend));$('budget-filter').setAttribute('aria-pressed',String(state.budget));
   const rows = visibleItems();
   const allGear = (state.filtered ? state.items : state.items.some(item => item.kind === 'gear') ? state.items : examples).filter(item => item.kind === 'gear' && item.active !== false);
   $('chips').innerHTML = categories.map(([key,label]) => '<button class="chip" type="button" data-category="' + key +
@@ -54,7 +56,7 @@ function render() {
     '" aria-label="' + (state.saved.includes(item.id) ? 'Remove saved ' : 'Save ') + escapeHtml(item.title) + '">' + icon('heart') + '</button>') +
     '<div class="cb"><h3>' + escapeHtml(item.title) + '</h3><div class="meta">' + icon('pin') + escapeHtml(item.area) +
     (distance(item) == null ? '' : ' · ' + distance(item).toFixed(1) + ' km') + '</div><p>' + escapeHtml(item.description) +
-    '</p>'+(item.owner_rating==null?'':'<div class="owner-rating">★ '+Number(item.owner_rating).toFixed(1)+' owner rating · '+Number(item.rating_count||0)+' review(s)</div>')+'</div><div class="cf"><div class="price">' + money(item.price) + ' <small>/ day</small></div></div>' +
+    '</p><div class="owner-rating">'+escapeHtml(item.name||'Neighbour')+' · '+(item.owner_rating==null?'New owner':Number(item.owner_rating).toFixed(1)+' / 5 · '+Number(item.rating_count||0)+' reviews')+'</div></div><div class="cf"><div class="price">' + money(item.price) + ' <small>/ day</small></div></div>' +
     '<div class="card-actions">' + (item.sample ? '<button class="btn pri" type="button" data-list="1">List real gear</button>' : state.user?.id === item.owner ? '<button class="btn" type="button" disabled>Your listing</button>' :
     '<button class="btn pri" type="button" data-request="' + item.id + '">Request to borrow</button>') + '</div></article>').join('') :
     '<div class="empty"><h3>' + (state.loading ? 'Loading gear' : 'No gear found') + '</h3><p>' +
@@ -131,15 +133,18 @@ document.addEventListener('keydown', event => {
 $('q').addEventListener('input',event => { state.query = event.target.value.trim().toLowerCase(); render(); });
 $('range').addEventListener('change',event => { state.radius = Number(event.target.value); render(); sendFilters(); });
 $('sort').addEventListener('change',event => { state.sort = event.target.value; render(); sendFilters(); });
+$('weekend-filter').onclick=()=>{state.weekend=!state.weekend;render();sendFilters();};
+$('budget-filter').onclick=()=>{state.budget=!state.budget;render();sendFilters();};
 function sendFilters() {
-  const startDate=$('start-date').value,endDate=$('end-date').value;
+  let startDate=$('start-date').value,endDate=$('end-date').value;
+  if(state.weekend){const saturday=new Date();saturday.setHours(12,0,0,0);saturday.setDate(saturday.getDate()+(6-saturday.getDay()+7)%7);const sunday=new Date(saturday);sunday.setDate(sunday.getDate()+1);const key=date=>[date.getFullYear(),String(date.getMonth()+1).padStart(2,'0'),String(date.getDate()).padStart(2,'0')].join('-');startDate=key(saturday);endDate=key(sunday);}
   const hint=$('filter-hint');
   if(Boolean(startDate)!==Boolean(endDate)) {hint.textContent='Choose both dates to filter availability.';return;}
   hint.textContent='';
   const selected=({tools:'Tools',tech:'Tech & Camera',outdoors:'Outdoors'})[state.category]||'all';
   send('filters',state.portal==='services'?'services':'rentals',{
     category:selected==='all'?'':selected,
-    minPrice:$('min-price').value,maxPrice:$('max-price').value,
+    minPrice:$('min-price').value,maxPrice:state.budget?'499':$('max-price').value,
     startDate,endDate,
     minRating:$('min-rating').value,radius:state.radius,
     sort:state.sort==='near'?'nearest':state.sort
