@@ -689,7 +689,7 @@ function renderActivity() {
     (user.admin?'<section class="seller-center" id="shop-review-queue"><h2>Business verification queue</h2><p>Loading submissions…</p></section>':'')+
     (user.admin ? '<h2>Open reports</h2>' + (activity.reports.map(item => '<div class="nl-record"><strong>' + escape(item.title) + '</strong><p>' + escape(item.reason) + '</p><button class="btn" data-moderate="' + item.id + '" data-status="removed">Remove listing</button> <button class="btn" data-moderate="' + item.id + '" data-status="dismissed">Dismiss</button></div>').join('') || '<p>No open reports.</p>') : '') :
     '<button class="btn primary" data-signin>Sign in</button>';
-  $('.threads').innerHTML = activity.threads.map(thread => '<button class="thread nl-thread' + (thread.id === threadId ? ' active' : '') + '" data-thread="' + thread.id + '"><b>' + escape(thread.title) + (thread.unread_count?' · '+Number(thread.unread_count)+' new':'') + '</b><small>' + escape(thread.status) + ' · ' + escape(thread.owner === user?.id ? thread.requesterName : thread.ownerName) + '</small></button>').join('') || empty(user ? 'No requests yet.' : 'Sign in to see your requests.');
+  $('.threads').innerHTML = activity.threads.map(thread => '<button class="thread nl-thread' + (thread.id === threadId ? ' active' : '') + '" data-thread="' + thread.id + '"><b>' + escape(thread.title) + (thread.unread_count?' · '+Number(thread.unread_count)+' new':'') + '</b><small>' + escape(thread.status) + (thread.is_demo?' · sample':'') + ' · ' + escape(thread.owner === user?.id ? thread.requesterName : thread.ownerName) + '</small></button>').join('') || empty(user ? 'No requests yet.' : 'Sign in to see your requests.');
   if (user) {
     const policyLinks=document.createElement('nav');policyLinks.className='account-policy-links';policyLinks.setAttribute('aria-label','Policies');policyLinks.innerHTML='<a href="/terms">Terms draft</a><a href="/privacy">Privacy draft</a><a href="/cancellation-refunds">Cancellation and refund draft</a><a href="/banned-items">Banned items draft</a>';$('#activity').append(policyLinks);
     loadSellerCenter();loadAvailability();loadKycCenter();loadShopCenter();if(user.admin)loadAdminShopQueue();
@@ -905,6 +905,16 @@ async function openThread(id) {
     timeline.append(entry);
   }
   if (timeline.childElementCount) chat.append(timeline);
+  if(Number(thread.is_demo)===1){
+    const notice=document.createElement('p');notice.className='nl-demo-notice';notice.textContent='Sample booking · read-only. Dates, messages and status are illustrative; no payment or handover happened. Create a new request to try the live flow.';chat.append(notice);
+    form.style.display='none';
+    const rows=await api('/requests/'+id+'/messages');
+    if(threadId!==id||view!=='messages')return;
+    activeMessages=rows;updateBorrow();
+    messages.replaceChildren(...rows.map(message=>{const bubble=document.createElement('div');bubble.className='bubble'+(message.sender===user.id?' me':'');bubble.textContent=message.body;return bubble;}));
+    messages.scrollTop=messages.scrollHeight;
+    return;
+  }
   const owner = thread.owner === user.id;
   if (thread.kind==='gear'&&thread.status==='disputed') {
     const claim=await api('/requests/'+id+'/claim');

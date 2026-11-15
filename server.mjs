@@ -1092,6 +1092,7 @@ async function api(req, res, path) {
     }
     const thread = await get(threads + ' WHERE r.id=? AND (r.requester=? OR l.owner=?)', id, user.id, user.id);
     if (!thread) fail(404, 'Conversation unavailable.');
+    if(Number(thread.is_demo)===1 && (method!=='GET'||['checkout','contact'].includes(match[3]))) fail(409,'This sample booking is read-only. Create a new request to try the live booking flow.');
     if (match[3] === 'audit' && method === 'GET') return await all('SELECT actor_user_id,old_status,new_status,occurred_at FROM booking_status_audit WHERE booking=? ORDER BY id',id);
     if (match[3]==='evidence'&&method==='GET') return await all('SELECT e.id,e.uploader_user_id,e.phase,e.uploaded_at,u.name FROM booking_evidence e JOIN users u ON u.id=e.uploader_user_id WHERE e.booking=? ORDER BY e.uploaded_at',id);
     if (match[3] === 'messages' && method === 'GET') {await run('UPDATE messages SET read_at=? WHERE request=? AND sender<>? AND read_at IS NULL',new Date().toISOString(),id,user.id);return (await all('SELECT id,sender,body,sent FROM messages WHERE request=? ORDER BY id DESC LIMIT 200', id)).reverse();}

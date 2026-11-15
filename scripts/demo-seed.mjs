@@ -19,6 +19,44 @@ const key=(kind,id,n=0)=>`demo/${kind}/${id}/${n}.svg`;
 async function reset(){
   const media=[...await rows('SELECT profile_photo_key AS storage_key FROM users WHERE is_demo=1'),...await rows('SELECT photo_key AS storage_key FROM listings WHERE is_demo=1'),...await rows('SELECT storage_key FROM demo_listing_photos WHERE is_demo=1')].map(x=>x.storage_key).filter(Boolean);
   await db.transaction(async tx=>{
+    const references=[
+      ['listings',"is_demo=0 AND owner IN (SELECT id FROM users WHERE is_demo=1)"],
+      ['requests',"is_demo=0 AND (listing IN (SELECT id FROM listings WHERE is_demo=1) OR requester IN (SELECT id FROM users WHERE is_demo=1))"],
+      ['messages',"is_demo=0 AND (request IN (SELECT id FROM requests WHERE is_demo=1) OR sender IN (SELECT id FROM users WHERE is_demo=1))"],
+      ['saved',"is_demo=0 AND (listing IN (SELECT id FROM listings WHERE is_demo=1) OR \"user\" IN (SELECT id FROM users WHERE is_demo=1))"],
+      ['ratings',"is_demo=0 AND booking IN (SELECT id FROM requests WHERE is_demo=1)"],
+      ['reports',"is_demo=0 AND (listing IN (SELECT id FROM listings WHERE is_demo=1) OR reporter IN (SELECT id FROM users WHERE is_demo=1))"],
+      ['uploads',"user_id IN (SELECT id FROM users WHERE is_demo=1)"],
+      ['listing_availability_blocks',"listing IN (SELECT id FROM listings WHERE is_demo=1)"],
+      ['booking_status_audit',"booking IN (SELECT id FROM requests WHERE is_demo=1) OR actor_user_id IN (SELECT id FROM users WHERE is_demo=1)"],
+      ['money_ledger',"booking IN (SELECT id FROM requests WHERE is_demo=1) OR actor_user_id IN (SELECT id FROM users WHERE is_demo=1)"],
+      ['protected_payments',"booking IN (SELECT id FROM requests WHERE is_demo=1)"],
+      ['booking_evidence',"booking IN (SELECT id FROM requests WHERE is_demo=1) OR uploader_user_id IN (SELECT id FROM users WHERE is_demo=1)"],
+      ['booking_ratings',"booking IN (SELECT id FROM requests WHERE is_demo=1) OR rater_user_id IN (SELECT id FROM users WHERE is_demo=1) OR ratee_user_id IN (SELECT id FROM users WHERE is_demo=1)"],
+      ['booking_late_fees',"booking IN (SELECT id FROM requests WHERE is_demo=1)"],
+      ['booking_claims',"booking IN (SELECT id FROM requests WHERE is_demo=1) OR owner_user_id IN (SELECT id FROM users WHERE is_demo=1) OR resolver_user_id IN (SELECT id FROM users WHERE is_demo=1)"],
+      ['booking_claim_audit',"booking IN (SELECT id FROM requests WHERE is_demo=1) OR actor_user_id IN (SELECT id FROM users WHERE is_demo=1)"],
+      ['booking_claim_evidence',"booking IN (SELECT id FROM requests WHERE is_demo=1) OR uploader_user_id IN (SELECT id FROM users WHERE is_demo=1)"],
+      ['demo_payments',"booking IN (SELECT id FROM requests WHERE is_demo=1)"],
+      ['owner_payment_accounts',"user_id IN (SELECT id FROM users WHERE is_demo=1)"],
+      ['kyc_cases',"user_id IN (SELECT id FROM users WHERE is_demo=1)"],
+      ['kyc_access_audit',"subject_user_id IN (SELECT id FROM users WHERE is_demo=1) OR reviewer_user_id IN (SELECT id FROM users WHERE is_demo=1)"],
+      ['kyc_review_audit',"subject_user_id IN (SELECT id FROM users WHERE is_demo=1) OR actor_user_id IN (SELECT id FROM users WHERE is_demo=1)"],
+      ['phone_otp_challenges',"user_id IN (SELECT id FROM users WHERE is_demo=1)"],
+      ['email_verification_tokens',"user_id IN (SELECT id FROM users WHERE is_demo=1)"],
+      ['password_reset_tokens',"user_id IN (SELECT id FROM users WHERE is_demo=1)"],
+      ['business_accounts',"owner_user_id IN (SELECT id FROM users WHERE is_demo=1) OR reviewer_user_id IN (SELECT id FROM users WHERE is_demo=1)"],
+      ['business_members',"user_id IN (SELECT id FROM users WHERE is_demo=1) OR invited_by IN (SELECT id FROM users WHERE is_demo=1)"],
+      ['business_member_audit',"actor_user_id IN (SELECT id FROM users WHERE is_demo=1) OR subject_user_id IN (SELECT id FROM users WHERE is_demo=1)"],
+      ['business_verification_audit',"actor_user_id IN (SELECT id FROM users WHERE is_demo=1)"],
+      ['business_document_access_audit',"reviewer_user_id IN (SELECT id FROM users WHERE is_demo=1)"],
+      ['shop_member_invites',"invitee_user_id IN (SELECT id FROM users WHERE is_demo=1) OR invited_by IN (SELECT id FROM users WHERE is_demo=1)"],
+      ['notification_outbox',"recipient_email IN (SELECT email FROM users WHERE is_demo=1)"],
+    ];
+    if(process.env.DATABASE_URL) await tx.exec('LOCK TABLE '+[...new Set([...references.map(([table])=>table),'users','demo_listing_photos','sessions'])].join(', ')+' IN SHARE ROW EXCLUSIVE MODE');
+    for(const [table,condition] of references){
+      if((await tx(`SELECT 1 FROM ${table} WHERE ${condition} LIMIT 1`)).rows.length) throw Error(`Demo reset refused: ${table} has activity linked to demo data. Preserve that activity or remove it explicitly before resetting.`);
+    }
     await tx('DELETE FROM sessions WHERE "user" IN (SELECT id FROM users WHERE is_demo=1)');
     for(const table of ['messages','ratings','saved','reports','requests','demo_listing_photos','listings','users']) await tx(`DELETE FROM ${table} WHERE is_demo=1`);
   });

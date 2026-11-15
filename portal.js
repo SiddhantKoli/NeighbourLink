@@ -98,16 +98,17 @@ function renderMessages() {
     '<button class="portal-row" type="button" data-thread="' + thread.id + '" aria-current="' + (thread.id === state.threadId) +
     '"><span class="portal-row-title">' + escapeHtml(thread.title) + '</span><span>' +
     escapeHtml(thread.owner === state.user?.id ? thread.requesterName : thread.ownerName) + '</span><span class="portal-badge">' +
-    escapeHtml(thread.status) + '</span></button>').join('') + '</div>' :
+    escapeHtml(thread.status) + (thread.is_demo?' · sample':'') + '</span></button>').join('') + '</div>' :
     '<div class="empty"><h3>No conversations yet</h3><p>' + (state.user ? 'Request an item or service to start one.' : 'Sign in to see your messages.') +
     '</p><button class="btn pri" data-' + (state.user ? 'navigate="' + state.portal + '"' : 'login') + '>' + (state.user ? state.portal === 'services' ? 'Find local help' : 'Browse gear' : 'Sign in') + '</button></div>';
   const thread = threads.find(row => row.id === state.threadId);
   $('detail').innerHTML = thread ? '<div class="portal-chat"><div class="portal-chat-head"><h2>' + escapeHtml(thread.title) +
     '</h2><span class="portal-badge">' + escapeHtml(thread.status) + '</span><small>' +
     escapeHtml(thread.owner === state.user?.id ? thread.requesterName : thread.ownerName) + '</small></div>' +
+    (thread.is_demo?'<p class="portal-demo-note">Sample booking · read-only. The history is illustrative; no payment or handover happened.</p>':'')+
     '<div class="portal-messages">' + (state.messages.length ? state.messages.map(message =>
       '<div class="portal-bubble' + (message.sender === state.user?.id ? ' mine' : '') + '">' + escapeHtml(message.body) + '</div>').join('') :
-      '<p>No messages yet. Send the first one.</p>') + '</div><form id="portal-compose" class="portal-compose"><input name="message" maxlength="2000" required aria-label="Write a message" placeholder="Write a message"><button class="btn pri">Send</button></form></div>' :
+      '<p>No messages yet. Send the first one.</p>') + '</div>'+(thread.is_demo?'':'<form id="portal-compose" class="portal-compose"><input name="message" maxlength="2000" required aria-label="Write a message" placeholder="Write a message"><button class="btn pri">Send</button></form>')+'</div>' :
     '<div class="portal-aside-empty"><h2>Choose a conversation</h2><p>Your messages will appear here.</p></div>';
 }
 

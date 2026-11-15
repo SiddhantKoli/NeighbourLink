@@ -140,6 +140,7 @@ body.nl-login[data-theme="dark"] .login-form-side{background:radial-gradient(cir
 .profile-setup-card .auth-field small{font-size:14px;font-weight:400;color:var(--auth-muted);line-height:1.4}
 .profile-setup-card input[type=file]{height:auto;padding:12px;background:var(--auth-soft)}
 .nl-booking-calendar{border:2px solid currentColor;padding:12px;margin:12px 0;font-size:14px}.nl-booking-calendar[hidden]{display:none}.nl-calendar-head{display:flex;align-items:center;justify-content:space-between;gap:10px}.nl-calendar-grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:4px;margin-top:10px}.nl-calendar-weekday{text-align:center;font-weight:700}.nl-calendar-grid button{min-height:38px;border:2px solid currentColor;background:var(--panel);color:inherit;cursor:pointer}.nl-calendar-grid button[aria-pressed="true"]{background:#00edb0;color:#111}.nl-calendar-grid button:disabled{opacity:.35;text-decoration:line-through;cursor:not-allowed}.nl-calendar-grid button:focus-visible,.nl-calendar-head button:focus-visible{outline:3px solid #fdb900;outline-offset:2px}
+.nl-demo-notice{border:2px solid currentColor;background:#fdb900;color:#111;padding:12px;font-size:14px;font-weight:700}
 #profile-preview{width:104px;height:104px;border-radius:50%;object-fit:cover;border:3px solid var(--auth-ink)}
 .phone-otp-form{display:grid;gap:14px;margin:18px 0;padding:18px;border:2px solid var(--auth-ink);box-shadow:5px 5px 0 var(--auth-ink);background:var(--auth-soft)}
 .phone-otp-form h2,.phone-otp-form p{margin:0}
