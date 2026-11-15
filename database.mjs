@@ -407,6 +407,18 @@ const migrations = [
     version: 10,
     name: 'persist provider subscription checkout link',
     async up(context) { await context.addColumn('shop_subscriptions','checkout_url','TEXT'); }
+  },
+  {
+    version: 11,
+    name: 'isolated demo dataset markers and listing artwork',
+    async up(context) {
+      for(const table of ['users','listings','requests','messages','saved','ratings','reports']) await context.addColumn(table,'is_demo','INTEGER NOT NULL DEFAULT 0');
+      await context.addColumn('messages','read_at','TEXT');
+      await context.exec(`CREATE TABLE IF NOT EXISTS demo_listing_photos(
+        listing INTEGER NOT NULL, position INTEGER NOT NULL, storage_key TEXT NOT NULL,
+        is_demo INTEGER NOT NULL DEFAULT 1, PRIMARY KEY(listing,position)
+      );`);
+    }
   }
 ];
 
@@ -427,7 +439,7 @@ function sqliteExecutor(db) {
 function postgresExecutor(client,pool) {
   const execute = async (sql,...args) => {
     let index = 0;
-  const qualified = sql.replace(/\b(FROM|JOIN|INTO|UPDATE|TABLE) (users|sessions|listings|saved|requests|messages|reports|ratings|demo_payments|email_verification_tokens|password_reset_tokens|booking_status_audit|money_ledger|marketplace_settings|uploads|schema_migrations|phone_otp_challenges|kyc_cases|kyc_access_audit|kyc_review_audit|owner_payment_accounts|protected_payments|payment_webhook_events|booking_evidence|booking_ratings|booking_late_fees|booking_claims|booking_claim_audit|booking_claim_evidence|listing_availability_blocks|notification_outbox|business_accounts|business_members|business_member_audit|business_verification_audit|business_document_access_audit|shop_subscription_plans|shop_subscriptions|shop_subscription_events|shop_member_invites)\b/g,'$1 neighbourlink.$2');
+  const qualified = sql.replace(/\b(FROM|JOIN|INTO|UPDATE|TABLE) (users|sessions|listings|saved|requests|messages|reports|ratings|demo_payments|email_verification_tokens|password_reset_tokens|booking_status_audit|money_ledger|marketplace_settings|uploads|schema_migrations|phone_otp_challenges|kyc_cases|kyc_access_audit|kyc_review_audit|owner_payment_accounts|protected_payments|payment_webhook_events|booking_evidence|booking_ratings|booking_late_fees|booking_claims|booking_claim_audit|booking_claim_evidence|listing_availability_blocks|notification_outbox|business_accounts|business_members|business_verification_audit|business_member_audit|business_document_access_audit|shop_subscription_plans|shop_subscriptions|shop_subscription_events|shop_member_invites|demo_listing_photos)\b/g,'$1 neighbourlink.$2');
     const result = await client.query(qualified.replaceAll('?',() => '$' + ++index),args);
     return { rows:result.rows, changes:result.rowCount };
   };

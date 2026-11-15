@@ -10,6 +10,8 @@
     "test": "node --test",
     "start:supabase": "node --env-file=.env supabase-start.mjs",
     "backup:sqlite": "node scripts/sqlite-backup.mjs"
+    ,"seed": "node --env-file-if-exists=.env scripts/demo-seed.mjs"
+    ,"seed:reset": "node --env-file-if-exists=.env scripts/demo-seed.mjs --reset"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1169.0",

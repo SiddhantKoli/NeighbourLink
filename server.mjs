@@ -55,7 +55,7 @@ async function queueNotification(userId,eventKey,subject,body) {
 function notifyUser(userId,eventKey,subject,body) {
   void queueNotification(userId,eventKey,subject,body).catch(error=>console.error('Could not queue email notification:',error.message));
 }
-const listings = 'SELECT l.id,l.owner,l.shop_id,l.quantity_available,l.listing_status,l.kind,l.title,l.category,l.price,l.item_value_minor,l.condition_checklist,l.area,l.latitude,l.longitude,l.description,l.active,(l.photo IS NOT NULL OR l.photo_key IS NOT NULL) AS hasPhoto,u.name,(SELECT AVG(br.score) FROM booking_ratings br WHERE br.ratee_user_id=l.owner) AS gear_rating,(SELECT COUNT(*) FROM booking_ratings br WHERE br.ratee_user_id=l.owner) AS gear_rating_count,(SELECT AVG(rt.score) FROM ratings rt JOIN requests rr ON rr.id=rt.booking JOIN listings rl ON rl.id=rr.listing WHERE rl.owner=l.owner) AS hire_rating,(SELECT COUNT(*) FROM ratings rt JOIN requests rr ON rr.id=rt.booking JOIN listings rl ON rl.id=rr.listing WHERE rl.owner=l.owner) AS hire_rating_count FROM listings l JOIN users u ON u.id=l.owner';
+const listings = 'SELECT l.id,l.owner,l.shop_id,l.quantity_available,l.listing_status,l.kind,l.title,l.category,l.price,l.item_value_minor,l.condition_checklist,l.area,l.latitude,l.longitude,l.description,l.active,(l.photo IS NOT NULL OR l.photo_key IS NOT NULL) AS hasPhoto,(SELECT COUNT(*) FROM demo_listing_photos dp WHERE dp.listing=l.id) AS demo_extra_photos,u.name,(SELECT AVG(br.score) FROM booking_ratings br WHERE br.ratee_user_id=l.owner) AS gear_rating,(SELECT COUNT(*) FROM booking_ratings br WHERE br.ratee_user_id=l.owner) AS gear_rating_count,(SELECT AVG(rt.score) FROM ratings rt JOIN requests rr ON rr.id=rt.booking JOIN listings rl ON rl.id=rr.listing WHERE rl.owner=l.owner) AS hire_rating,(SELECT COUNT(*) FROM ratings rt JOIN requests rr ON rr.id=rt.booking JOIN listings rl ON rl.id=rr.listing WHERE rl.owner=l.owner) AS hire_rating_count FROM listings l JOIN users u ON u.id=l.owner';
 const threads = 'SELECT r.*,(SELECT payment_status FROM protected_payments WHERE booking=r.id) AS payment_status,(SELECT score FROM booking_ratings WHERE booking=r.id AND rater_user_id=r.requester) AS requester_score,(SELECT score FROM booking_ratings WHERE booking=r.id AND rater_user_id=l.owner) AS owner_score,l.price AS listing_price,l.condition_checklist,l.deposit_override_minor,l.title,l.owner,l.kind,u.name AS "requesterName",o.name AS "ownerName" FROM requests r JOIN listings l ON l.id=r.listing JOIN users u ON u.id=r.requester JOIN users o ON o.id=l.owner';
 const assets = new Map([['/', ['index.html','text/html']], ['/login', ['index.html','text/html']], ['/profile', ['index.html','text/html']], ['/verify-email', ['index.html','text/html']], ['/reset-password', ['index.html','text/html']], ['/terms',['terms.html','text/html']], ['/privacy',['privacy.html','text/html']], ['/cancellation-refunds',['cancellation-refunds.html','text/html']], ['/banned-items',['banned-items.html','text/html']], ['/landing.html', ['landing.html','text/html']], ['/landing.js', ['landing.js','text/javascript']], ['/borrow.html', ['borrow.html','text/html']], ['/borrow.js', ['borrow.js','text/javascript']], ['/portal.js', ['portal.js','text/javascript']], ['/portal.css', ['portal.css','text/css']], ['/policy.css',['policy.css','text/css']], ['/app.js',['app.js','text/javascript']], ['/app.css',['app.css','text/css']]]);
 for (const name of ['camera','tent','bicycle']) {
@@ -921,12 +921,15 @@ async function api(req, res, path) {
       throw error;
     }
   }
-  if (method === 'GET' && path === '/activity') return {
+  if (method === 'GET' && path === '/activity') {
+    const unread=await all('SELECT request,COUNT(*) AS count FROM messages WHERE sender<>? AND read_at IS NULL GROUP BY request',user.id);
+    const counts=new Map(unread.map(row=>[row.request,Number(row.count)]));
+    return {
     listings: await all(listings + ' WHERE l.owner=? OR l.shop_id IN (SELECT shop_id FROM business_members WHERE user_id=?) ORDER BY l.id DESC', user.id,user.id),
     saved: (await all('SELECT listing FROM saved WHERE "user"=?', user.id)).map(row => row.listing),
-    threads: (await all(threads + ' WHERE r.requester=? OR l.owner=? ORDER BY r.id DESC', user.id, user.id)).map(row=>({...row,score:user.id===row.requester?row.requester_score:row.owner_score,otherScore:user.id===row.requester?row.owner_score:row.requester_score})),
+    threads: (await all(threads + ' WHERE r.requester=? OR l.owner=? ORDER BY r.id DESC', user.id, user.id)).map(row=>({...row,score:user.id===row.requester?row.requester_score:row.owner_score,otherScore:user.id===row.requester?row.owner_score:row.requester_score,unread_count:counts.get(row.id)||0})),
     reports: admin ? await all('SELECT reports.*,listings.title FROM reports JOIN listings ON listings.id=reports.listing WHERE reports.status=?', 'open') : []
-  };
+  };}
   const evidenceFile=path.match(/^\/requests\/(\d+)\/evidence\/([a-f0-9-]{36})$/i);
   if (method==='GET'&&evidenceFile) {
     const booking=Number(evidenceFile[1]);
@@ -1053,7 +1056,7 @@ async function api(req, res, path) {
   if (match?.[1] === 'saved' && ['PUT','DELETE'].includes(method)) {
     if (method === 'PUT') {
       if (!await get('SELECT id FROM listings WHERE id=? AND active=1', id)) fail(404, 'Listing unavailable.');
-      await run('INSERT INTO saved VALUES(?,?) ON CONFLICT DO NOTHING', user.id, id);
+      await run('INSERT INTO saved("user",listing) VALUES(?,?) ON CONFLICT DO NOTHING', user.id, id);
     } else await run('DELETE FROM saved WHERE "user"=? AND listing=?', user.id, id);
     return { ok: true };
   }
@@ -1091,7 +1094,7 @@ async function api(req, res, path) {
     if (!thread) fail(404, 'Conversation unavailable.');
     if (match[3] === 'audit' && method === 'GET') return await all('SELECT actor_user_id,old_status,new_status,occurred_at FROM booking_status_audit WHERE booking=? ORDER BY id',id);
     if (match[3]==='evidence'&&method==='GET') return await all('SELECT e.id,e.uploader_user_id,e.phase,e.uploaded_at,u.name FROM booking_evidence e JOIN users u ON u.id=e.uploader_user_id WHERE e.booking=? ORDER BY e.uploaded_at',id);
-    if (match[3] === 'messages' && method === 'GET') return (await all('SELECT id,sender,body,sent FROM messages WHERE request=? ORDER BY id DESC LIMIT 200', id)).reverse();
+    if (match[3] === 'messages' && method === 'GET') {await run('UPDATE messages SET read_at=? WHERE request=? AND sender<>? AND read_at IS NULL',new Date().toISOString(),id,user.id);return (await all('SELECT id,sender,body,sent FROM messages WHERE request=? ORDER BY id DESC LIMIT 200', id)).reverse();}
     if (match[3] === 'messages' && method === 'POST') {
       const body=field(await json(req),'message',2000),sent=await run('INSERT INTO messages(request,sender,body) VALUES(?,?,?) RETURNING id',id,user.id,body);
       const recipient=thread.owner===user.id?thread.requester:thread.owner;
@@ -1384,6 +1387,12 @@ createServer(async (req,res) => {
     } else if (req.method === 'GET' && assets.has(path)) {
       const [file, mime] = assets.get(path);
       res.writeHead(200, {'Content-Type':mime.startsWith('image/') ? mime : mime + '; charset=utf-8'}).end(readFileSync(new URL(file,import.meta.url)));
+    } else if (req.method === 'GET' && /^\/photos\/\d+\/[12]$/.test(path)) {
+      const [,listingId,position]=path.match(/^\/photos\/(\d+)\/([12])$/);
+      const row=await get('SELECT dp.storage_key FROM demo_listing_photos dp JOIN listings l ON l.id=dp.listing WHERE dp.listing=? AND dp.position=? AND l.active=1',Number(listingId),Number(position));
+      if(!row) fail(404,'Photo unavailable.');
+      const photo=await storage.get(row.storage_key);if(!photo) fail(404,'Photo unavailable.');
+      res.writeHead(200,{'Content-Type':photo.contentType,'Cache-Control':'private, max-age=300'}).end(photo.bytes);
     } else if (req.method === 'GET' && /^\/photos\/\d+$/.test(path)) {
       const row=await get('SELECT photo,photo_key FROM listings WHERE id=? AND active=1',Number(path.slice(8)));
       if (!row) fail(404,'Photo unavailable.');

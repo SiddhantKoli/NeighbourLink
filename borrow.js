@@ -66,7 +66,7 @@ function render() {
   $('savedN').textContent = savedGear;
   const selected = rows.find(item => item.id === state.selected) || rows[0];
   state.selected = selected?.id ?? null;
-  $('detail').innerHTML = selected ? art(selected) + '<div class="dd"><h2>' + escapeHtml(selected.title) + '</h2>' +
+  $('detail').innerHTML = selected ? art(selected) + (selected.demo_extra_photos?'<div class="demo-gallery">'+Array.from({length:Number(selected.demo_extra_photos)},(_,i)=>'<img loading="lazy" src="/photos/'+selected.id+'/'+(i+1)+'" alt="Additional view of '+escapeHtml(selected.title)+'">').join('')+'</div>':'') + '<div class="dd"><h2>' + escapeHtml(selected.title) + '</h2>' +
     '<div class="price">' + money(selected.price) + ' <small>/ day</small></div><p>' + escapeHtml(selected.description) + '</p>' +
     (selected.owner_rating==null?'':'<div class="owner-rating">★ '+Number(selected.owner_rating).toFixed(1)+' owner rating · '+Number(selected.rating_count||0)+' review(s)</div>')+
     '<div class="owner"><div class="av">' + escapeHtml(selected.name?.slice(0,1).toUpperCase() || '?') +

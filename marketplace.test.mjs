@@ -385,7 +385,7 @@ test('versioned foundation migrations seed placeholder settings and protect appe
     const { openDatabase } = await import('./database.mjs');
     const query = await openDatabase();
     const versions = await query('SELECT version,name FROM schema_migrations ORDER BY version');
-  assert.deepEqual(versions.rows.map(row => row.version),[1,2,3,4,5,6,7,8,9,10]);
+  assert.deepEqual(versions.rows.map(row => row.version),[1,2,3,4,5,6,7,8,9,10,11]);
     const settings = await query('SELECT setting_key,setting_value FROM marketplace_settings ORDER BY setting_key');
     assert.equal(settings.rows.find(row => row.setting_key === 'claim_window_hours').setting_value,'24');
     await query('INSERT INTO money_ledger(booking,event_type,amount_minor,currency,idempotency_key,metadata,occurred_at) VALUES(1,\'hold\',100,\'INR\',\'test-hold\',\'{}\',?)',new Date().toISOString());

@@ -12,6 +12,12 @@ NeighbourLink is a neighbourhood rental marketplace built with Node.js 24, a pla
 
 Set `PORT` and `HOST` to change the listener, and `DB_PATH` to select a different SQLite file. The default database is `data/marketplace.sqlite`; local uploaded images are stored in `data/object-storage`. Keep both directories on persistent storage.
 
+### Demo dataset
+
+Set `DEMO_SEED=1` and a unique `DEMO_PASSWORD` of at least 16 characters in the ignored `.env` file, then run `npm run seed`. It creates 40 demo members across Bengaluru, 60 Gear listings, 40 Local Help listings, roughly 80 booking conversations, saved items, ratings, and open reports. The images are generated SVG artwork stored in the same private object storage used for listing and profile photos; they are labelled as demo illustrations. Running the command again leaves the dataset unchanged. `npm run seed:reset` removes marked demo rows and their artwork while preserving normal users and listings. Both commands refuse production; reset also requires `DEMO_SEED=1`.
+
+Use the password from `DEMO_PASSWORD` for `demo.renter@neighbourlink.test`, `demo.owner@neighbourlink.test`, `demo.provider@neighbourlink.test`, and `demo.admin@neighbourlink.test`. Set `ADMIN_EMAIL=demo.admin@neighbourlink.test` only in a disposable demo environment to enable the admin queue. These `.test` addresses do not receive email. The demo accounts have verified email and phone fields so they can be used locally without OTP delivery.
+
 ## Environment variables
 
 | Variable | Purpose |
