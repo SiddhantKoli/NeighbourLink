@@ -168,10 +168,33 @@ const booking = dialog('booking-dialog','Send a request',
   '<label class="nl-field"><span id="booking-details-label">Details</span><textarea name="details" maxlength="1000" rows="3"></textarea></label>');
 const bookingQuote=document.createElement('p');bookingQuote.className='nl-booking-quote';bookingQuote.setAttribute('aria-live','polite');
 booking.querySelector('form .nl-controls').before(bookingQuote);
+const bookingCalendar=document.createElement('div');
+bookingCalendar.className='nl-booking-calendar';
+bookingCalendar.setAttribute('aria-label','Choose available rental dates');
+bookingQuote.before(bookingCalendar);
+let unavailableDates=[];
+let bookingMonth=new Date();bookingMonth.setDate(1);
+function dateKey(date){return [date.getFullYear(),String(date.getMonth()+1).padStart(2,'0'),String(date.getDate()).padStart(2,'0')].join('-');}
+function dateIsUnavailable(key){return unavailableDates.some(row=>row.start_date<=key&&row.end_date>=key);}
+function renderBookingCalendar(){
+  const form=booking.querySelector('form'),today=dateKey(new Date());
+  const first=new Date(bookingMonth),last=new Date(first.getFullYear(),first.getMonth()+1,0).getDate();
+  bookingCalendar.innerHTML='<div class="nl-calendar-head"><button class="btn" type="button" data-month="-1" aria-label="Previous month">←</button><strong>'+first.toLocaleDateString(undefined,{month:'long',year:'numeric'})+'</strong><button class="btn" type="button" data-month="1" aria-label="Next month">→</button></div><div class="nl-calendar-grid">'+['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map(day=>'<span class="nl-calendar-weekday">'+day+'</span>').join('')+Array(first.getDay()).fill('<span></span>').join('')+Array.from({length:last},(_,i)=>{const key=dateKey(new Date(first.getFullYear(),first.getMonth(),i+1)),blocked=key<today||dateIsUnavailable(key),selected=key===form.elements.startDate.value||key===form.elements.endDate.value;return '<button type="button" data-day="'+key+'" '+(blocked?'disabled':'')+' aria-pressed="'+selected+'" aria-label="'+key+(blocked?' unavailable':' available')+'">'+(i+1)+'</button>';}).join('')+'</div><p>Unavailable days are disabled. Choose pickup, then return day.</p>';
+}
+bookingCalendar.onclick=event=>{
+  const month=event.target.closest('[data-month]'),day=event.target.closest('[data-day]'),form=booking.querySelector('form');
+  if(month){bookingMonth.setMonth(bookingMonth.getMonth()+Number(month.dataset.month));renderBookingCalendar();return;}
+  if(!day)return;
+  const value=day.dataset.day;
+  if(!form.elements.startDate.value||form.elements.endDate.value||value<form.elements.startDate.value){form.elements.startDate.value=value;form.elements.endDate.value='';}
+  else if(!unavailableDates.some(row=>row.start_date<=value&&row.end_date>=form.elements.startDate.value)){form.elements.endDate.value=value;}
+  else {bookingQuote.textContent='That range includes an unavailable day. Choose another return date.';return;}
+  renderBookingCalendar();updateBookingQuote();
+};
 async function updateBookingQuote() {
   const form=booking.querySelector('form');
   if (!requestedListing||!form.elements.startDate.value||!form.elements.endDate.value) return;
-  try { const quote=await api('/listings/'+requestedListing+'/quote?startDate='+encodeURIComponent(form.elements.startDate.value)+'&endDate='+encodeURIComponent(form.elements.endDate.value));bookingQuote.textContent='Estimated rental ₹'+(quote.rentMinor/100).toLocaleString('en-IN')+' + refundable deposit ₹'+(quote.depositMinor/100).toLocaleString('en-IN')+' · '+quote.days+' day(s).'; }
+  try { const quote=await api('/listings/'+requestedListing+'/quote?startDate='+encodeURIComponent(form.elements.startDate.value)+'&endDate='+encodeURIComponent(form.elements.endDate.value));bookingQuote.textContent=quote.days+' day(s) = rental ₹'+(quote.rentMinor/100).toLocaleString('en-IN')+' · estimated refundable deposit ₹'+(quote.depositMinor/100).toLocaleString('en-IN'); }
   catch(error) { bookingQuote.textContent=error.message; }
 }
 function openBooking(item) {
@@ -179,6 +202,8 @@ function openBooking(item) {
   form.reset();
   requestedListing = item.id;
   const gear = item.kind === 'gear';
+  bookingCalendar.hidden=!gear;
+  if(gear){unavailableDates=[];bookingMonth=new Date();bookingMonth.setDate(1);bookingCalendar.textContent='Loading available dates…';api('/listings/'+item.id+'/availability').then(rows=>{if(requestedListing!==item.id)return;unavailableDates=rows;renderBookingCalendar();}).catch(error=>{bookingCalendar.textContent='Could not load available dates: '+error.message;});}
   bookingQuote.textContent='Deposit adjusts to item value, account trust and rental duration.';
   $('#booking-dialog-title').textContent = gear ? 'Request gear rental' : 'Request local help';
   $('#booking-date-label').textContent = gear ? 'Pickup date' : 'Preferred appointment date';
@@ -187,13 +212,14 @@ function openBooking(item) {
   form.elements.endDate.parentElement.style.display = gear ? '' : 'none';
   form.elements.endDate.required = gear;
   form.elements.details.required = !gear;
-  form.elements.startDate.onchange = () => { form.elements.endDate.min = form.elements.startDate.value;updateBookingQuote(); };
-  form.elements.endDate.onchange=updateBookingQuote;
+  form.elements.startDate.onchange = () => { form.elements.endDate.min = form.elements.startDate.value;renderBookingCalendar();updateBookingQuote(); };
+  form.elements.endDate.onchange=() => {renderBookingCalendar();updateBookingQuote();};
   form.elements.endDate.min = form.elements.startDate.min;
   booking.querySelector('.primary').textContent = 'Send request';
   show(booking);
 }
 submit(booking, async form => {
+  if(bookingCalendar.hidden===false&&unavailableDates.some(row=>row.start_date<=form.get('endDate')&&row.end_date>=form.get('startDate'))) throw Error('Those dates include a booked or blocked day. Choose another range.');
   const {id,depositMinor} = await api('/requests/' + requestedListing,'PUT',Object.fromEntries(form));
   booking.close();
   threadId = id;
